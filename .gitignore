@@ -1,0 +1,7 @@
+# 忽略資料夾
+pixels/
+Screenshots/
+
+# 忽略 input 和 output 相關的所有檔案 (包含照片)
+input*
+output*

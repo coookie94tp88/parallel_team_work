@@ -1,10 +1,26 @@
-#include <opencv2\opencv.hpp>
+#include <opencv2/opencv.hpp>
 #include <iostream>
 #include <fstream>
 #include <sstream>
-#include <boost\filesystem.hpp>
+#include <boost/filesystem.hpp>
 #include <iomanip>
-#include <direct.h>
+#ifdef _WIN32
+#include <direct.h>   // Windows: _mkdir, _getcwd, etc.
+#else
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>    // for getcwd, chdir on Unix-like
+// map common Windows names to POSIX ones if code uses _mkdir/_getcwd/_chdir
+#ifndef _mkdir
+#define _mkdir(dir) mkdir((dir), 0755)
+#endif
+#ifndef _getcwd
+#define _getcwd(buf, size) getcwd((buf), (size))
+#endif
+#ifndef _chdir
+#define _chdir(dir) chdir(dir)
+#endif
+#endif
 #include <ctime>
 #include "exif.h"
 
@@ -172,7 +188,7 @@ computePixelsAndIndex(const string& images_root, const string& out_folder, Size 
 
 	cout << "Pixelizing images from " << images_root << ". This might take a while." << endl;
 	vector<string> images;
-	vector<string> extensions = { ".jpg", ".jpeg", ".JPG", ".JPEG" };
+	vector<string> extensions = { ".jpg", ".jpeg", ".JPG", ".JPEG", ".png", ".PNG" };
 	get_all(images_root, extensions, images);
 
 	fs::remove_all(out_folder);
