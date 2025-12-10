@@ -1,7 +1,27 @@
 # 忽略資料夾
 pixels/
 Screenshots/
+pokemon_pixels/
+pokemon_tiles/
 
 # 忽略 input 和 output 相關的所有檔案 (包含照片)
 input*
 output*
+test_input*
+
+# 編譯產生的執行檔
+photomosaic
+photomosaic_mac
+*.o
+*.out
+
+# Python 相關
+__pycache__/
+*.pyc
+*.pyo
+
+# 臨時檔案
+*.swp
+*.swo
+*~
+.DS_Store

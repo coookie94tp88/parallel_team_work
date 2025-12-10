@@ -252,9 +252,8 @@ struct idxVal{
 	int idx;
 	double val;
 
-	bool operator<(idxVal conf){
-		if (val < conf.val)return true;
-		return false;
+	bool operator<(const idxVal& conf) const {
+		return val < conf.val;
 	}
 };
 
