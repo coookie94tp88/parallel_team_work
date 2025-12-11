@@ -31,3 +31,4 @@ __pycache__/
 .DS_Store
 mosaic_*.png
 .vscode*
+webcam_test
