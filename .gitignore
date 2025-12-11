@@ -12,6 +12,7 @@ test_input*
 # 編譯產生的執行檔
 photomosaic
 photomosaic_mac
+video_mosaic
 *.o
 *.out
 
