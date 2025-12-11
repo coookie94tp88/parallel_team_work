@@ -9,6 +9,16 @@
 #include <omp.h>
 #include <boost/filesystem.hpp>
 
+// SIMD intrinsics for vectorization
+#if defined(__ARM_NEON) || defined(__aarch64__)
+#include <arm_neon.h>  // ARM NEON
+#define USE_SIMD_NEON
+#elif defined(__SSE__)
+#include <xmmintrin.h>  // SSE
+#include <emmintrin.h>  // SSE2
+#define USE_SIMD_SSE
+#endif
+
 namespace fs = boost::filesystem;
 using namespace cv;
 using namespace std;
@@ -79,13 +89,81 @@ private:
         return hist;
     }
     
-    // Color distance
+    // Scalar color distance (fallback)
     inline float colorDistance(const Vec3f& c1, const Vec3f& c2) {
         float db = c1[0] - c2[0];
         float dg = c1[1] - c2[1];
         float dr = c1[2] - c2[2];
         return db*db + dg*dg + dr*dr;
     }
+    
+#ifdef USE_SIMD_NEON
+    // ARM NEON-optimized batch distance computation (for Apple Silicon)
+    inline void colorDistanceBatch4(const Vec3f& target, 
+                                     const Vec3f* tiles,
+                                     float* distances) {
+        // Load target color (broadcast to all lanes)
+        float32x4_t target_b = vdupq_n_f32(target[0]);
+        float32x4_t target_g = vdupq_n_f32(target[1]);
+        float32x4_t target_r = vdupq_n_f32(target[2]);
+        
+        // Load 4 tile colors
+        float tile_b_arr[4] = {tiles[0][0], tiles[1][0], tiles[2][0], tiles[3][0]};
+        float tile_g_arr[4] = {tiles[0][1], tiles[1][1], tiles[2][1], tiles[3][1]};
+        float tile_r_arr[4] = {tiles[0][2], tiles[1][2], tiles[2][2], tiles[3][2]};
+        
+        float32x4_t tile_b = vld1q_f32(tile_b_arr);
+        float32x4_t tile_g = vld1q_f32(tile_g_arr);
+        float32x4_t tile_r = vld1q_f32(tile_r_arr);
+        
+        // Compute differences
+        float32x4_t diff_b = vsubq_f32(target_b, tile_b);
+        float32x4_t diff_g = vsubq_f32(target_g, tile_g);
+        float32x4_t diff_r = vsubq_f32(target_r, tile_r);
+        
+        // Square differences
+        float32x4_t sq_b = vmulq_f32(diff_b, diff_b);
+        float32x4_t sq_g = vmulq_f32(diff_g, diff_g);
+        float32x4_t sq_r = vmulq_f32(diff_r, diff_r);
+        
+        // Sum: b² + g² + r²
+        float32x4_t result = vaddq_f32(sq_b, vaddq_f32(sq_g, sq_r));
+        
+        // Store results
+        vst1q_f32(distances, result);
+    }
+#elif defined(USE_SIMD_SSE)
+    // SIMD-optimized batch distance computation
+    inline void colorDistanceBatch4(const Vec3f& target, 
+                                     const Vec3f* tiles,
+                                     float* distances) {
+        // Load target color (broadcast to all lanes)
+        __m128 target_b = _mm_set1_ps(target[0]);
+        __m128 target_g = _mm_set1_ps(target[1]);
+        __m128 target_r = _mm_set1_ps(target[2]);
+        
+        // Load 4 tile colors
+        __m128 tile_b = _mm_setr_ps(tiles[0][0], tiles[1][0], tiles[2][0], tiles[3][0]);
+        __m128 tile_g = _mm_setr_ps(tiles[0][1], tiles[1][1], tiles[2][1], tiles[3][1]);
+        __m128 tile_r = _mm_setr_ps(tiles[0][2], tiles[1][2], tiles[2][2], tiles[3][2]);
+        
+        // Compute differences
+        __m128 diff_b = _mm_sub_ps(target_b, tile_b);
+        __m128 diff_g = _mm_sub_ps(target_g, tile_g);
+        __m128 diff_r = _mm_sub_ps(target_r, tile_r);
+        
+        // Square differences
+        __m128 sq_b = _mm_mul_ps(diff_b, diff_b);
+        __m128 sq_g = _mm_mul_ps(diff_g, diff_g);
+        __m128 sq_r = _mm_mul_ps(diff_r, diff_r);
+        
+        // Sum: b² + g² + r²
+        __m128 result = _mm_add_ps(sq_b, _mm_add_ps(sq_g, sq_r));
+        
+        // Store results
+        _mm_storeu_ps(distances, result);
+    }
+#endif
     
     // Compare histograms
     float compareHistograms(const Mat& hist1, const Mat& hist2) {
@@ -100,8 +178,8 @@ private:
         vector<int> assignment(num_cells, -1);
         vector<int> tile_usage(num_tiles, 0);
         
-        // Process each cell in parallel, finding best available tile
-        #pragma omp parallel for
+        // Process each cell in parallel with dynamic scheduling
+        #pragma omp parallel for schedule(dynamic, 32)
         for (int cell_idx = 0; cell_idx < num_cells; cell_idx++) {
             // Find top K best tiles for this cell
             const int K = 10;  // Consider top 10 candidates
@@ -294,7 +372,8 @@ public:
         
         vector<vector<float>> cost_matrix(total_cells, vector<float>(tiles.size()));
         
-        #pragma omp parallel for
+        // Use dynamic scheduling for better load balancing
+        #pragma omp parallel for schedule(dynamic, 64)
         for (int cell_idx = 0; cell_idx < total_cells; cell_idx++) {
             int y = cell_idx / config.grid_width;
             int x = cell_idx % config.grid_width;
@@ -302,10 +381,27 @@ public:
             Vec3b pixel = resized_input.at<Vec3b>(y, x);
             Vec3f target_color(pixel[0], pixel[1], pixel[2]);
             
+#if defined(USE_SIMD_NEON) || defined(USE_SIMD_SSE)
+            // SIMD path: process 4 tiles at a time
+            size_t tile_idx = 0;
+            for (; tile_idx + 3 < tiles.size(); tile_idx += 4) {
+                colorDistanceBatch4(target_color, 
+                                   &tiles[tile_idx].mean_color,
+                                   &cost_matrix[cell_idx][tile_idx]);
+            }
+            
+            // Handle remaining tiles with scalar code
+            for (; tile_idx < tiles.size(); tile_idx++) {
+                cost_matrix[cell_idx][tile_idx] = 
+                    colorDistance(target_color, tiles[tile_idx].mean_color);
+            }
+#else
+            // Scalar fallback
             for (size_t tile_idx = 0; tile_idx < tiles.size(); tile_idx++) {
                 cost_matrix[cell_idx][tile_idx] = 
                     colorDistance(target_color, tiles[tile_idx].mean_color);
             }
+#endif
         }
         
         auto cost_end = high_resolution_clock::now();
