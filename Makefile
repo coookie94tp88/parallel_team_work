@@ -1,9 +1,21 @@
 # Makefile for Video Mosaic Project
 
-CXX = g++
-CXXFLAGS = -std=c++11 -O3 -Xpreprocessor -fopenmp -I/opt/homebrew/opt/libomp/include
-LDFLAGS = -L/opt/homebrew/opt/libomp/lib -lomp
-OPENCV_FLAGS = $(shell pkg-config --cflags --libs opencv4)
+UNAME_S := $(shell uname -s)
+
+ifeq ($(UNAME_S),Darwin)
+	# macOS (Homebrew) settings
+	CXX = g++
+	CXXFLAGS = -std=c++11 -O3 -Xpreprocessor -fopenmp -I/opt/homebrew/opt/libomp/include
+	LDFLAGS = -L/opt/homebrew/opt/libomp/lib -lomp
+	OPENCV_FLAGS = $(shell pkg-config --cflags --libs opencv4)
+else
+	# Linux / WSL / other Unix-like systems
+	CXX = g++
+	CXXFLAGS = -std=c++11 -O3 -fopenmp
+	LDFLAGS = -fopenmp
+	OPENCV_FLAGS = $(shell pkg-config --cflags --libs opencv4)
+endif
+
 BOOST_FLAGS = -lboost_filesystem
 
 # Targets
