@@ -13,6 +13,10 @@ all: video_mosaic photomosaic_mac webcam_test
 video_mosaic: video_mosaic.cpp
 	$(CXX) $(CXXFLAGS) $< -o $@ $(OPENCV_FLAGS) $(BOOST_FLAGS) $(LDFLAGS)
 
+# Optimal assignment mosaic (NEW - global optimization)
+video_mosaic_optimal: video_mosaic_optimal.cpp
+	$(CXX) $(CXXFLAGS) $< -o $@ $(OPENCV_FLAGS) $(BOOST_FLAGS) $(LDFLAGS)
+
 # Original photo mosaic
 photomosaic_mac: main.cpp exif.cpp
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(OPENCV_FLAGS) $(BOOST_FLAGS) $(LDFLAGS)

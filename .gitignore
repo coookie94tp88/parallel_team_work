@@ -3,6 +3,8 @@ pixels/
 Screenshots/
 pokemon_pixels/
 pokemon_tiles/
+pokemon_tiles_backup/
+cifar_tiles/
 
 # 忽略 input 和 output 相關的所有檔案 (包含照片)
 input*
@@ -13,6 +15,7 @@ test_input*
 photomosaic
 photomosaic_mac
 video_mosaic
+video_mosaic_optimal
 *.o
 *.out
 
@@ -26,3 +29,4 @@ __pycache__/
 *.swo
 *~
 .DS_Store
+mosaic_*.png

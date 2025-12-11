@@ -458,6 +458,7 @@ public:
 void printUsage(const char* program_name) {
     cout << "Usage: " << program_name << " [options]" << endl;
     cout << "\nOptions:" << endl;
+    cout << "  -d, --tiles DIR     Tile directory (default: pokemon_tiles)" << endl;
     cout << "  -w, --width N       Grid width (default: 40)" << endl;
     cout << "  -h, --height N      Grid height (default: 30)" << endl;
     cout << "  -t, --tile-size N   Tile size in pixels (default: 32)" << endl;
@@ -499,6 +500,9 @@ int main(int argc, char** argv) {
         if (arg == "--help") {
             printUsage(argv[0]);
             return 0;
+        }
+        else if (arg == "-d" || arg == "--tiles") {
+            if (i + 1 < argc) config.tile_dir = argv[++i];
         }
         else if (arg == "-w" || arg == "--width") {
             if (i + 1 < argc) config.grid_width = atoi(argv[++i]);
