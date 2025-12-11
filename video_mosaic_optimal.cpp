@@ -24,13 +24,29 @@ using namespace cv;
 using namespace std;
 using namespace chrono;
 
-// Tile information structure
-struct Tile {
-    string path;
-    Mat image;
-    Vec3f mean_color;
-    Mat histogram;
-    int last_used_frame;
+// Multi-region tile features (3x3 grid for spatial detail)
+struct TileFeatures {
+    array<Vec3f, 9> region_colors;  // 3x3 grid of colors
+    Vec3f mean_color;                // Overall mean (for backward compat)
+};
+
+// Struct of Arrays layout for better cache locality
+struct TileDatabase {
+    // Hot data (accessed every frame) - tightly packed
+    vector<TileFeatures> features;
+    
+    // Cold data (accessed only during assignment/display)
+    vector<Mat> images;
+    vector<string> paths;
+    
+    size_t size() const { return features.size(); }
+    bool empty() const { return features.empty(); }
+    
+    void resize(size_t n) {
+        features.resize(n);
+        images.resize(n);
+        paths.resize(n);
+    }
 };
 
 // Configuration
@@ -51,24 +67,54 @@ struct VideoMosaicConfig {
 class OptimalMosaicGenerator {
 private:
     VideoMosaicConfig config;
-    vector<Tile> tiles;
+    TileDatabase tiles;
     int frame_count;
     vector<int> previous_assignment;  // Cache previous frame's assignment
     Mat previous_frame;                // Cache previous input frame
     
-    // Compute mean color, ignoring black backgrounds
-    Vec3f computeMeanColor(const Mat& img) {
+    // Compute 3x3 grid of region colors to capture spatial detail
+    TileFeatures computeRegionColors(const Mat& img) {
+        TileFeatures features;
+        
+        // Create mask to ignore black backgrounds
         Mat gray;
         cvtColor(img, gray, COLOR_BGR2GRAY);
         Mat mask = gray > 30;
         
-        Scalar mean = cv::mean(img, mask);
+        // Divide tile into 3x3 grid
+        int region_h = img.rows / 3;
+        int region_w = img.cols / 3;
         
-        if (countNonZero(mask) == 0) {
-            mean = cv::mean(img);
+        for (int ry = 0; ry < 3; ry++) {
+            for (int rx = 0; rx < 3; rx++) {
+                int y_start = ry * region_h;
+                int x_start = rx * region_w;
+                int y_end = (ry == 2) ? img.rows : (ry + 1) * region_h;
+                int x_end = (rx == 2) ? img.cols : (rx + 1) * region_w;
+                
+                Rect region_rect(x_start, y_start, x_end - x_start, y_end - y_start);
+                Mat region = img(region_rect);
+                Mat region_mask = mask(region_rect);
+                
+                Scalar mean = cv::mean(region, region_mask);
+                
+                if (countNonZero(region_mask) == 0) {
+                    mean = cv::mean(region);
+                }
+                
+                int idx = ry * 3 + rx;
+                features.region_colors[idx] = Vec3f(mean[0], mean[1], mean[2]);
+            }
         }
         
-        return Vec3f(mean[0], mean[1], mean[2]);
+        // Compute overall mean color
+        Scalar overall_mean = cv::mean(img, mask);
+        if (countNonZero(mask) == 0) {
+            overall_mean = cv::mean(img);
+        }
+        features.mean_color = Vec3f(overall_mean[0], overall_mean[1], overall_mean[2]);
+        
+        return features;
     }
     
     // Compute histogram, ignoring black backgrounds
@@ -89,7 +135,35 @@ private:
         return hist;
     }
     
-    // Scalar color distance (fallback)
+    // Multi-region distance: compare 3x3 grids with weighted importance
+    inline float regionDistance(const TileFeatures& f1, const TileFeatures& f2) {
+        // Weight matrix: center region more important than edges
+        const float weights[9] = {
+            0.5f, 1.0f, 0.5f,  // top row
+            1.0f, 2.0f, 1.0f,  // middle row (center = 2x weight)
+            0.5f, 1.0f, 0.5f   // bottom row
+        };
+        
+        float total_dist = 0.0f;
+        float total_weight = 0.0f;
+        
+        for (int i = 0; i < 9; i++) {
+            const Vec3f& c1 = f1.region_colors[i];
+            const Vec3f& c2 = f2.region_colors[i];
+            
+            float db = c1[0] - c2[0];
+            float dg = c1[1] - c2[1];
+            float dr = c1[2] - c2[2];
+            float dist = db*db + dg*dg + dr*dr;
+            
+            total_dist += dist * weights[i];
+            total_weight += weights[i];
+        }
+        
+        return total_dist / total_weight;
+    }
+    
+    // Scalar color distance (for single colors)
     inline float colorDistance(const Vec3f& c1, const Vec3f& c2) {
         float db = c1[0] - c2[0];
         float dg = c1[1] - c2[1];
@@ -206,7 +280,9 @@ private:
             
             // Try to assign best available tile
             int assigned_tile = -1;
-            for (const auto& [cost, tile_idx] : candidates) {
+            for (size_t cand_idx = 0; cand_idx < candidates.size(); cand_idx++) {
+                float cost = candidates[cand_idx].first;
+                int tile_idx = candidates[cand_idx].second;
                 int current_usage;
                 #pragma omp atomic read
                 current_usage = tile_usage[tile_idx];
@@ -320,18 +396,10 @@ public:
             Mat resized;
             resize(img, resized, Size(config.tile_size, config.tile_size));
             
-            Tile tile;
-            tile.path = filenames[i];
-            tile.image = resized;
-            tile.mean_color = computeMeanColor(resized);
-            
-            if (config.use_histogram) {
-                tile.histogram = computeHistogram(resized);
-            }
-            
-            tile.last_used_frame = -1;
-            
-            tiles[i] = tile;
+            // Store in SoA layout
+            tiles.paths[i] = filenames[i];
+            tiles.images[i] = resized;
+            tiles.features[i] = computeRegionColors(resized);
             
             // Thread-safe progress counter
             #pragma omp atomic
@@ -372,36 +440,40 @@ public:
         
         vector<vector<float>> cost_matrix(total_cells, vector<float>(tiles.size()));
         
-        // Use dynamic scheduling for better load balancing
-        #pragma omp parallel for schedule(dynamic, 64)
-        for (int cell_idx = 0; cell_idx < total_cells; cell_idx++) {
-            int y = cell_idx / config.grid_width;
-            int x = cell_idx % config.grid_width;
-            
-            Vec3b pixel = resized_input.at<Vec3b>(y, x);
-            Vec3f target_color(pixel[0], pixel[1], pixel[2]);
-            
-#if defined(USE_SIMD_NEON) || defined(USE_SIMD_SSE)
-            // SIMD path: process 4 tiles at a time
-            size_t tile_idx = 0;
-            for (; tile_idx + 3 < tiles.size(); tile_idx += 4) {
-                colorDistanceBatch4(target_color, 
-                                   &tiles[tile_idx].mean_color,
-                                   &cost_matrix[cell_idx][tile_idx]);
+        // Use blocked iteration for better cache locality
+        const int BLOCK_SIZE = 8;  // Process 8x8 blocks of cells
+        #pragma omp parallel for schedule(static) collapse(2)
+        for (int block_y = 0; block_y < config.grid_height; block_y += BLOCK_SIZE) {
+            for (int block_x = 0; block_x < config.grid_width; block_x += BLOCK_SIZE) {
+                // Process cells within this block
+                for (int y = block_y; y < min(block_y + BLOCK_SIZE, config.grid_height); y++) {
+                    for (int x = block_x; x < min(block_x + BLOCK_SIZE, config.grid_width); x++) {
+                        int cell_idx = y * config.grid_width + x;
+                        
+                        // Extract region from input frame for this cell
+                        int y_start = y * input_tile_height;
+                        int x_start = x * input_tile_width;
+                        int y_end = min((y + 1) * input_tile_height, input_frame.rows);
+                        int x_end = min((x + 1) * input_tile_width, input_frame.cols);
+                        
+                        Rect cell_rect(x_start, y_start, x_end - x_start, y_end - y_start);
+                        Mat cell_img = input_frame(cell_rect);
+                        
+                        // Resize to tile size for fair comparison
+                        Mat cell_resized;
+                        resize(cell_img, cell_resized, Size(config.tile_size, config.tile_size));
+                        
+                        // Extract region colors from this cell
+                        TileFeatures cell_features = computeRegionColors(cell_resized);
+                        
+                        // Compare with all tiles using region-based distance
+                        for (size_t tile_idx = 0; tile_idx < tiles.size(); tile_idx++) {
+                            cost_matrix[cell_idx][tile_idx] = 
+                                regionDistance(cell_features, tiles.features[tile_idx]);
+                        }
+                    }
+                }
             }
-            
-            // Handle remaining tiles with scalar code
-            for (; tile_idx < tiles.size(); tile_idx++) {
-                cost_matrix[cell_idx][tile_idx] = 
-                    colorDistance(target_color, tiles[tile_idx].mean_color);
-            }
-#else
-            // Scalar fallback
-            for (size_t tile_idx = 0; tile_idx < tiles.size(); tile_idx++) {
-                cost_matrix[cell_idx][tile_idx] = 
-                    colorDistance(target_color, tiles[tile_idx].mean_color);
-            }
-#endif
         }
         
         auto cost_end = high_resolution_clock::now();
@@ -443,7 +515,7 @@ public:
             
             Rect roi(x * config.tile_size, y * config.tile_size, 
                     config.tile_size, config.tile_size);
-            tiles[tile_idx].image.copyTo(mosaic(roi));
+            tiles.images[tile_idx].copyTo(mosaic(roi));
         }
         
         auto place_end = high_resolution_clock::now();
