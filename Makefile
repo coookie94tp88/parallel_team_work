@@ -24,7 +24,8 @@ endif
 
 # Targets
 # Targets
-all: prep_dirs bin/video_mosaic bin/video_mosaic_optimal bin/video_mosaic_edge bin/photomosaic_mac bin/webcam_test
+# Targets
+all: prep_dirs bin/video_mosaic bin/video_mosaic_optimal bin/video_mosaic_edge bin/video_mosaic_edge_optimized bin/video_mosaic_edge_metal bin/photomosaic_mac bin/webcam_test
 
 # Preparation
 prep_dirs:
@@ -42,6 +43,32 @@ bin/video_mosaic_optimal: src/video_mosaic_optimal.cpp
 bin/video_mosaic_edge: src/video_mosaic_edge.cpp
 	$(CXX) $(CXXFLAGS) $< -o $@ $(OPENCV_FLAGS) $(BOOST_FLAGS) $(LDFLAGS)
 
+# Edge-aware mosaic (CPU OPTIMIZED)
+bin/video_mosaic_edge_optimized: src/video_mosaic_edge_optimized.cpp
+	$(CXX) $(CXXFLAGS) $< -o $@ $(OPENCV_FLAGS) $(BOOST_FLAGS) $(LDFLAGS)
+
+# --- METAL GPU ACCELERATION ---
+
+# 1. Compile Metal Kernel to .air
+src/gpu/kernels.air: src/gpu/kernels.metal
+	xcrun -sdk macosx metal -c $< -o $@
+
+# 2. Link .air to .metallib
+default.metallib: src/gpu/kernels.air
+	xcrun -sdk macosx metallib $< -o $@
+
+# 3. Compile Obj-C++ Wrapper
+bin/metal_compute.o: src/gpu/metal_compute.mm src/gpu/metal_compute.h
+	clang++ -c -std=c++17 -fobjc-arc -O3 $< -o $@
+
+# 4. Main Executable (Links C++ + Obj-C++)
+bin/video_mosaic_edge_metal: src/video_mosaic_edge_metal.cpp bin/metal_compute.o default.metallib
+	$(CXX) $(CXXFLAGS) -fobjc-arc src/video_mosaic_edge_metal.cpp bin/metal_compute.o -o $@ \
+	$(OPENCV_FLAGS) $(BOOST_FLAGS) $(LDFLAGS) \
+	-framework Metal -framework Foundation -framework CoreGraphics
+
+# -----------------
+
 # Original photo mosaic
 bin/photomosaic_mac: src/legacy/main.cpp src/legacy/exif.cpp
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(OPENCV_FLAGS) $(BOOST_FLAGS) $(LDFLAGS)
@@ -52,7 +79,7 @@ bin/webcam_test: src/tests/webcam_test.cpp
 
 # Clean
 clean:
-	rm -rf bin
+	rm -rf bin src/gpu/*.air default.metallib bin/*.o
 
 # Run video mosaic
 run: bin/video_mosaic_edge

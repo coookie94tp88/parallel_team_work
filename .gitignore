@@ -1,34 +1,41 @@
-# 忽略資料夾
-pixels/
-Screenshots/
-pokemon_pixels/
-pokemon_tiles/
-pokemon_tiles_backup/
-cifar_tiles/
-
-# 忽略 input 和 output 相關的所有檔案 (包含照片)
-input*
-output*
-test_input*
-
-# 編譯產生的執行檔
-photomosaic
-photomosaic_mac
-video_mosaic
-video_mosaic_optimal
-video_mosaic_edge
-webcam_test
+# Build Output
+bin/
 *.o
-*.out
+*.app
+*.exe
+*.dSYM
 
-# Python 相關
+# Metal Artifacts
+*.air
+*.metallib
+
+# Logs and Benchmarks
+*.log
+
+# LaTeX Artifacts (keep .tex and .pdf)
+*.aux
+*.out
+*.toc
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+*.xdv
+
+# System
+.DS_Store
+Thumbs.db
+
+# Python
 __pycache__/
 *.pyc
-*.pyo
 
-# 臨時檔案
-*.swp
-*.swo
-*~
-.DS_Store
-mosaic_*.png
+# Data
+data/cifar_tiles/
+data/pokemon_pixels/
+data/pokemon_tiles_backup/
+
+# Test Artifacts
+*.jpg
+*.png
+webcam_test
+
