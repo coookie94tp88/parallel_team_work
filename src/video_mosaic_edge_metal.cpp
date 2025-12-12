@@ -287,6 +287,11 @@ public:
         double total_fps = 0.0;
         
         cout << "Warming up..." << endl;
+        
+        // Explicitly create window to help with multi-monitor context placement
+        namedWindow("Metal Mosaic", WINDOW_NORMAL);
+        resizeWindow("Metal Mosaic", 1280, 720); // Set a reasonable default size
+        
         // Warmup
         for(int i=0; i<5; i++) {
             if(!cap.read(frame)) break;
@@ -335,6 +340,9 @@ int main(int argc, char** argv) {
     for(int i=1; i<argc; i++) {
         string arg = argv[i];
         if(arg=="-d") config.tile_dir = argv[++i];
+        if(arg=="--small") { config.grid_width=40; config.grid_height=30; }
+        if(arg=="--medium") { config.grid_width=60; config.grid_height=45; }
+        if(arg=="--large") { config.grid_width=80; config.grid_height=60; }
         if(arg=="--ultra") { config.grid_width=100; config.grid_height=75; }
         if(arg=="--benchmark") benchmark_frames = atoi(argv[++i]);
     }
