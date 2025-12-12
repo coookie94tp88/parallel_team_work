@@ -603,7 +603,7 @@ void printUsage(const char* program_name) {
 
 int main(int argc, char** argv) {
     VideoMosaicConfig config;
-    config.tile_dir = "pokemon_tiles";
+    config.tile_dir = "data/pokemon_tiles";
     config.tile_size = 32;
     config.grid_width = 60;   // Smaller default for optimal (faster)
     config.grid_height = 45;

@@ -17,6 +17,7 @@ photomosaic_mac
 video_mosaic
 video_mosaic_optimal
 video_mosaic_edge
+webcam_test
 *.o
 *.out
 
