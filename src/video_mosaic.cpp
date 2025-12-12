@@ -13,17 +13,10 @@ using namespace cv;
 using namespace std;
 using namespace chrono;
 
-// Edge features for structure-aware matching
-struct EdgeFeatures {
-    float edge_strength;              // Average gradient magnitude
-    array<float, 4> edge_histogram;   // Edge directions: 0°, 45°, 90°, 135°
-};
-
-// Multi-region tile features (3x3 grid for spatial detail + edges)
+// Multi-region tile features (3x3 grid for spatial detail)
 struct TileFeatures {
     array<Vec3f, 9> region_colors;  // 3x3 grid of colors
     Vec3f mean_color;                // Overall mean (for backward compat)
-    EdgeFeatures edges;              // Edge/gradient information
 };
 
 // Struct of Arrays layout for better cache locality
@@ -111,53 +104,6 @@ private:
         return features;
     }
     
-    // Compute edge features using Sobel operators
-    EdgeFeatures computeEdgeFeatures(const Mat& img) {
-        EdgeFeatures features;
-        features.edge_histogram.fill(0.0f);
-        
-        // Convert to grayscale
-        Mat gray;
-        cvtColor(img, gray, COLOR_BGR2GRAY);
-        
-        // Compute gradients using Sobel
-        Mat grad_x, grad_y;
-        Sobel(gray, grad_x, CV_32F, 1, 0, 3);  // Horizontal gradient
-        Sobel(gray, grad_y, CV_32F, 0, 1, 3);  // Vertical gradient
-        
-        // Compute magnitude and direction
-        Mat magnitude, direction;
-        cartToPolar(grad_x, grad_y, magnitude, direction, true);  // true = degrees
-        
-        // Compute average edge strength
-        features.edge_strength = mean(magnitude)[0];
-        
-        // Build histogram of edge directions (4 bins: 0°, 45°, 90°, 135°)
-        for (int y = 0; y < magnitude.rows; y++) {
-            for (int x = 0; x < magnitude.cols; x++) {
-                float mag = magnitude.at<float>(y, x);
-                float dir = direction.at<float>(y, x);
-                
-                // Only count strong edges (threshold = 10)
-                if (mag > 10.0f) {
-                    // Quantize direction to 4 bins
-                    // 0°: 337.5-22.5, 45°: 22.5-67.5, 90°: 67.5-112.5, 135°: 112.5-157.5
-                    int bin = int((dir + 22.5f) / 45.0f) % 4;
-                    features.edge_histogram[bin] += mag;
-                }
-            }
-        }
-        
-        // Normalize histogram
-        float total = 0.0f;
-        for (float v : features.edge_histogram) total += v;
-        if (total > 0.001f) {
-            for (float& v : features.edge_histogram) v /= total;
-        }
-        
-        return features;
-    }
-    
     // Multi-region distance: compare 3x3 grids with weighted importance
     inline float regionDistance(const TileFeatures& f1, const TileFeatures& f2) {
         // Weight matrix: center region more important than edges
@@ -186,55 +132,14 @@ private:
         return total_dist / total_weight;
     }
     
-    // Combined distance: color + edge features
-    inline float combinedDistance(const TileFeatures& f1, const TileFeatures& f2) {
-        // 1. Color distance (existing multi-region matching)
-        float color_dist = regionDistance(f1, f2);
-        
-        // 2. Edge strength difference (normalized)
-        float strength_diff = abs(f1.edges.edge_strength - f2.edges.edge_strength);
-        
-        // 3. Edge direction histogram distance (chi-square)
-        float direction_dist = 0.0f;
-        int valid_bins = 0;
-        for (int i = 0; i < 4; i++) {
-            float sum = f1.edges.edge_histogram[i] + f2.edges.edge_histogram[i];
-            if (sum > 0.01f) {  // Only count bins with significant values
-                float diff = f1.edges.edge_histogram[i] - f2.edges.edge_histogram[i];
-                direction_dist += (diff * diff) / sum;
-                valid_bins++;
-            }
-        }
-        
-        // Average over valid bins to normalize
-        if (valid_bins > 0) {
-            direction_dist /= valid_bins;
-        }
-        
-        // Weighted combination - if no edges detected, fall back to color only
-        const float COLOR_WEIGHT = 0.7f;      // Increase color importance
-        const float EDGE_DIR_WEIGHT = 0.2f;   // Reduce edge direction weight
-        const float EDGE_STR_WEIGHT = 0.1f;   // Edge strength
-        
-        // Scale edge distances to match color distance range
-        float edge_component = 0.0f;
-        if (f1.edges.edge_strength > 1.0f || f2.edges.edge_strength > 1.0f) {
-            // Only use edge features if at least one tile has edges
-            edge_component = EDGE_DIR_WEIGHT * direction_dist * 100.0f +
-                           EDGE_STR_WEIGHT * strength_diff;
-        }
-        
-        return COLOR_WEIGHT * color_dist + edge_component;
-    }
-    
-    // Find best matching tile using combined features (greedy)
+    // Find best matching tile using multi-region features (greedy)
     int findBestTile(const TileFeatures& target_features) {
         int best_idx = 0;
         float best_dist = FLT_MAX;
         
-        // Find best matching tile using combined distance
+        // Find best matching tile using region-based distance
         for (size_t i = 0; i < tiles.size(); i++) {
-            float dist = combinedDistance(target_features, tiles.features[i]);
+            float dist = regionDistance(target_features, tiles.features[i]);
             if (dist < best_dist) {
                 best_dist = dist;
                 best_idx = i;
@@ -299,12 +204,7 @@ public:
             // Store in SoA layout
             tiles.paths[i] = filenames[i];
             tiles.images[i] = resized;
-            
-            // Compute region colors
             tiles.features[i] = computeRegionColors(resized);
-            
-            // Compute edge features
-            tiles.features[i].edges = computeEdgeFeatures(resized);
             
             // Thread-safe progress counter
             #pragma omp atomic
@@ -318,7 +218,7 @@ public:
         }
         
         cout << "Successfully loaded " << tiles.size() << " tiles" << endl;
-        cout << "Using edge-aware matching (3x3 regions + 4-direction edges)" << endl;
+        cout << "Using multi-region matching (3x3 grid)" << endl;
         return !tiles.empty();
     }
     
@@ -365,9 +265,6 @@ public:
                 
                 // Extract region colors from this cell
                 TileFeatures cell_features = computeRegionColors(cell_resized);
-                
-                // Extract edge features from this cell
-                cell_features.edges = computeEdgeFeatures(cell_resized);
                 
                 // Find best matching tile
                 int tile_idx = findBestTile(cell_features);
@@ -532,7 +429,7 @@ void printUsage(const char* program_name) {
 int main(int argc, char** argv) {
     // Default configuration
     VideoMosaicConfig config;
-    config.tile_dir = "pokemon_tiles";
+    config.tile_dir = "data/pokemon_tiles";
     config.tile_size = 32;
     config.grid_width = 60;   // Match optimal default
     config.grid_height = 45;
