@@ -80,7 +80,6 @@ To overcome CPU compute limits, we implemented a custom Metal compute kernel.
     \item \textbf{Dataset}: CIFAR-10 (60,000 images, 32x32 pixels)
 \end{itemize}
 
-<<<<<<< HEAD
 \section{Experimental Results}
 
 \subsection{Hardware and Workload Setup}
@@ -122,31 +121,6 @@ CPU 8T & Ultra ($100 \times 75$) & 0.86 & -- \\ \hline
 The CPU implementation shows limited scalability, peaking at 2.41 FPS on Medium settings with 8 threads. The massive computational demand of performing 450 million metric evaluations per frame (Ultra settings) brings the CPU to a crawl (0.86 FPS).
 
 The Metal implementation drastically outperforms the CPU, achieving \textbf{10.27 FPS} on Medium settings (14x speedup over single-threaded CPU). Even on the demanding Ultra setting, it maintains \textbf{7.09 FPS}, providing a smooth visual experience that is impossible with the CPU-only approach. The slight drop in GPU performance at Ultra settings primarily comes from the overhead of rendering and capturing larger video frames, rather than the tile matching kernel itself.
-=======
-\subsection{Performance Benchmark}
-We compared the implementation on two grid sizes: Medium ($60 \times 45$) and Ultra ($100 \times 75$).
-
-\begin{table}[H]
-\centering
-\begin{tabular}{|l|c|c|c|}
-\hline
-\textbf{Configuration} & \textbf{Grid Size} & \textbf{FPS} & \textbf{Speedup} \\ \hline
-CPU Optimized (1 Thread) & Medium & 0.71 & 1.0x (Baseline) \\ \hline
-CPU Optimized (4 Threads) & Medium & 2.14 & 3.0x \\ \hline
-CPU Optimized (8 Threads) & Medium & 2.46 & 3.5x \\ \hline
-\textbf{Metal GPU} & \textbf{Medium} & \textbf{11.87} & \textbf{16.7x} \\ \hline
-\hline
-CPU Optimized (8 Threads) & Ultra & 0.86 & -- \\ \hline
-\textbf{Metal GPU} & \textbf{Ultra} & \textbf{10.86} & \textbf{12.6x (vs CPU 8T)} \\ \hline
-\end{tabular}
-\caption{Performance comparison between CPU and GPU implementations. Speedup is calculated relative to the single-threaded CPU baseline for Medium, and relative to the best CPU result for Ultra.}
-\end{table}
-
-\subsection{Analysis}
-The CPU implementation scales linearly up to 4 threads, but sees diminishing returns at 8 threads (2.46 FPS), likely due to memory bandwidth saturation from the constant reloading of tile data into cache.
-
-The Metal implementation yields a dramatic speedup. Notably, the performance drop from "Medium" (11.87 FPS) to "Ultra" (10.86 FPS) is very small on the GPU, whereas the CPU struggles significantly (dropping to <1 FPS). This indicates that the GPU implementation is not compute-bound by the matching logic, but rather limited by the serial overhead of video capture and rendering, proving it effectively solved the computational bottleneck.
->>>>>>> 33c260b967bd071c5d0d1a143e3b5242df9cfc7e
 
 
 \section{Conclusion}
