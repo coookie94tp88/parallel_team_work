@@ -38,6 +38,7 @@ video_mosaic_edge
 video_mosaic_edge_optimized
 video_mosaic_edge_metal
 webcam_test
+photomosaic
 
 # OS
 .DS_Store
