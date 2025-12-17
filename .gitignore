@@ -4,14 +4,13 @@ CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
 Makefile
-<<<<<<< HEAD
 bin/
-=======
->>>>>>> f172a2d (cleanup build artifacts and binaries from git)
 *.a
 *.o
+*.app
+*.exe
+*.dSYM
 
-<<<<<<< HEAD
 # Metal
 *.air
 *.metallib
@@ -40,19 +39,13 @@ video_mosaic_edge_optimized
 video_mosaic_edge_metal
 webcam_test
 
-=======
-# Binaries
-video_mosaic_cpu
-video_mosaic_metal
-video_mosaic
-video_mosaic_optimal
-video_mosaic_edge
-video_mosaic_edge_optimized
-video_mosaic_edge_metal
-
->>>>>>> f172a2d (cleanup build artifacts and binaries from git)
 # OS
 .DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.pyc
 
 # IDE
 .vscode*
