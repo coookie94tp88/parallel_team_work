@@ -9,7 +9,8 @@ using namespace std;
 MetalComputeEngine::MetalComputeEngine() 
     : device(nullptr), commandQueue(nullptr), computeState(nullptr),
       bufferTileColors(nullptr), bufferTileStrengths(nullptr), bufferTileHists(nullptr),
-      numTiles(0) {}
+      numTiles(0), bufferCellColors(nullptr), bufferCellStrengths(nullptr), 
+      bufferCellHists(nullptr), bufferOutput(nullptr), bufferCapacityCells(0) {}
 
 MetalComputeEngine::~MetalComputeEngine() {
     // ARC (Automatic Reference Counting) handles Objective-C cleanup 
@@ -118,70 +119,91 @@ void MetalComputeEngine::findBestMatches(
     const std::vector<float>& cell_hists,
     std::vector<int>& best_indices
 ) {
-    id<MTLDevice> mtlDevice = (__bridge id<MTLDevice>)device;
-    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)commandQueue;
-    id<MTLComputePipelineState> pso = (__bridge id<MTLComputePipelineState>)computeState;
-    
-    size_t numCells = best_indices.size();
-    
-    // Create per-frame buffers for Cells
-    // NOTE: In a continuous loop, it's better to stick to one reusable buffer
-    // and just memcpy/didModifyRange. But buffer creation on Metal is fast.
-    MTLResourceOptions options = MTLResourceStorageModeManaged;
-    
-    id<MTLBuffer> bufCellColors = [mtlDevice newBufferWithBytes:cell_colors.data() length:cell_colors.size()*sizeof(float) options:options];
-    id<MTLBuffer> bufCellStr = [mtlDevice newBufferWithBytes:cell_strengths.data() length:cell_strengths.size()*sizeof(float) options:options];
-    id<MTLBuffer> bufCellHist = [mtlDevice newBufferWithBytes:cell_hists.data() length:cell_hists.size()*sizeof(float) options:options];
-    
-    // Output Buffer
-    id<MTLBuffer> bufOutput = [mtlDevice newBufferWithLength:numCells * sizeof(int) options:options];
-    
-    // Constant Buffer for numTiles
-    uint32_t nTiles = (uint32_t)numTiles;
-    
-    // Create Command Buffer
-    id<MTLCommandBuffer> cmdBuffer = [queue commandBuffer];
-    id<MTLComputeCommandEncoder> encoder = [cmdBuffer computeCommandEncoder];
-    
-    [encoder setComputePipelineState:pso];
-    
-    // Bind Buffers (Indices match kernels.metal)
-    // Tile Data (0, 1, 2)
-    [encoder setBuffer:(__bridge id<MTLBuffer>)bufferTileColors offset:0 atIndex:0];
-    [encoder setBuffer:(__bridge id<MTLBuffer>)bufferTileStrengths offset:0 atIndex:1];
-    [encoder setBuffer:(__bridge id<MTLBuffer>)bufferTileHists offset:0 atIndex:2];
-    
-    // Cell Data (3, 4, 5)
-    [encoder setBuffer:bufCellColors offset:0 atIndex:3];
-    [encoder setBuffer:bufCellStr offset:0 atIndex:4];
-    [encoder setBuffer:bufCellHist offset:0 atIndex:5];
-    
-    // Output (6)
-    [encoder setBuffer:bufOutput offset:0 atIndex:6];
-    
-    // Constants (7)
-    [encoder setBytes:&nTiles length:sizeof(uint32_t) atIndex:7];
-    
-    // Dispatch Threads
-    MTLSize threadsPerGrid = MTLSizeMake(numCells, 1, 1);
-    
-    // Threads per threadgroup (Metal max is usually 512 or 1024)
-    // We just need efficient occupancy.
-    NSUInteger w = pso.threadExecutionWidth;
-    NSUInteger h = pso.maxTotalThreadsPerThreadgroup / w;
-    MTLSize threadsPerGroup = MTLSizeMake(w * h, 1, 1);
-    if (threadsPerGroup.width > numCells) threadsPerGroup.width = numCells;
-    
-    [encoder dispatchThreads:threadsPerGrid threadsPerThreadgroup:threadsPerGroup];
-    [encoder endEncoding];
-    
-    // Commit and Wait
-    [cmdBuffer commit];
-    [cmdBuffer waitUntilCompleted];
-    
-    // Read Results
-    int* ptr = (int*)[bufOutput contents];
-    memcpy(best_indices.data(), ptr, numCells * sizeof(int));
-    
-    // Buffer release handled by ARC (autorelease pool usually, but here scope end)
+    @autoreleasepool {
+        id<MTLDevice> mtlDevice = (__bridge id<MTLDevice>)device;
+        id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)commandQueue;
+        id<MTLComputePipelineState> pso = (__bridge id<MTLComputePipelineState>)computeState;
+        
+        size_t numCells = best_indices.size();
+        
+        // Logical check: Do we need to (re)allocate buffers?
+        if (bufferCellColors == nullptr || numCells > bufferCapacityCells) {
+            // Cleanup old if expanding (unlikely in this app but good practice)
+            if (bufferCellColors) {
+                CFRelease(bufferCellColors);
+                CFRelease(bufferCellStrengths);
+                CFRelease(bufferCellHists);
+                CFRelease(bufferOutput);
+            }
+            
+            cout << "Allocating Metal Cell Buffers for " << numCells << " cells..." << endl;
+            
+            MTLResourceOptions options = MTLResourceStorageModeManaged;
+            
+            id<MTLBuffer> bColors = [mtlDevice newBufferWithLength:numCells * 36 * sizeof(float) options:options];
+            id<MTLBuffer> bStr = [mtlDevice newBufferWithLength:numCells * sizeof(float) options:options];
+            id<MTLBuffer> bHist = [mtlDevice newBufferWithLength:numCells * 4 * sizeof(float) options:options];
+            id<MTLBuffer> bOut = [mtlDevice newBufferWithLength:numCells * sizeof(int) options:options];
+            
+            // Retain for C++ persistence
+            bufferCellColors = (__bridge_retained void*)bColors;
+            bufferCellStrengths = (__bridge_retained void*)bStr;
+            bufferCellHists = (__bridge_retained void*)bHist;
+            bufferOutput = (__bridge_retained void*)bOut;
+            
+            bufferCapacityCells = numCells;
+        }
+        
+        // 1. Copy Data to Persistent Buffers
+        id<MTLBuffer> bufCellColors = (__bridge id<MTLBuffer>)bufferCellColors;
+        id<MTLBuffer> bufCellStr = (__bridge id<MTLBuffer>)bufferCellStrengths;
+        id<MTLBuffer> bufCellHist = (__bridge id<MTLBuffer>)bufferCellHists;
+        id<MTLBuffer> bufOutput = (__bridge id<MTLBuffer>)bufferOutput;
+        
+        memcpy([bufCellColors contents], cell_colors.data(), cell_colors.size() * sizeof(float));
+        [bufCellColors didModifyRange:NSMakeRange(0, cell_colors.size() * sizeof(float))];
+        
+        memcpy([bufCellStr contents], cell_strengths.data(), cell_strengths.size() * sizeof(float));
+        [bufCellStr didModifyRange:NSMakeRange(0, cell_strengths.size() * sizeof(float))];
+        
+        memcpy([bufCellHist contents], cell_hists.data(), cell_hists.size() * sizeof(float));
+        [bufCellHist didModifyRange:NSMakeRange(0, cell_hists.size() * sizeof(float))];
+        
+        // 2. Setup Command Buffer
+        uint32_t nTiles = (uint32_t)numTiles;
+        id<MTLCommandBuffer> cmdBuffer = [queue commandBuffer];
+        id<MTLComputeCommandEncoder> encoder = [cmdBuffer computeCommandEncoder];
+        
+        [encoder setComputePipelineState:pso];
+        
+        // Bind Buffers
+        [encoder setBuffer:(__bridge id<MTLBuffer>)bufferTileColors offset:0 atIndex:0];
+        [encoder setBuffer:(__bridge id<MTLBuffer>)bufferTileStrengths offset:0 atIndex:1];
+        [encoder setBuffer:(__bridge id<MTLBuffer>)bufferTileHists offset:0 atIndex:2];
+        
+        [encoder setBuffer:bufCellColors offset:0 atIndex:3];
+        [encoder setBuffer:bufCellStr offset:0 atIndex:4];
+        [encoder setBuffer:bufCellHist offset:0 atIndex:5];
+        [encoder setBuffer:bufOutput offset:0 atIndex:6];
+        
+        [encoder setBytes:&nTiles length:sizeof(uint32_t) atIndex:7];
+        
+        // Dispatch
+        MTLSize threadsPerGrid = MTLSizeMake(numCells, 1, 1);
+        NSUInteger w = pso.threadExecutionWidth;
+        NSUInteger h = pso.maxTotalThreadsPerThreadgroup / w;
+        MTLSize threadsPerGroup = MTLSizeMake(w * h, 1, 1);
+        if (threadsPerGroup.width > numCells) threadsPerGroup.width = numCells;
+        
+        [encoder dispatchThreads:threadsPerGrid threadsPerThreadgroup:threadsPerGroup];
+        [encoder endEncoding];
+        
+        // Commit and Wait
+        [cmdBuffer commit];
+        [cmdBuffer waitUntilCompleted];
+        
+        // 3. Read Results
+        int* ptr = (int*)[bufOutput contents];
+        memcpy(best_indices.data(), ptr, numCells * sizeof(int));
+    }
 }

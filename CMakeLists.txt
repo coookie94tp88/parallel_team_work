@@ -64,7 +64,7 @@ if(APPLE)
 
     # Metal App
     add_executable(video_mosaic_metal 
-        src/apps/video_mosaic_metal.cpp 
+        src/apps/video_mosaic_metal.mm 
         src/gpu/metal_compute.mm
     )
     target_link_libraries(video_mosaic_metal 

@@ -53,4 +53,12 @@ private:
     
     // Cached sizes
     size_t numTiles;
+    
+    // Persistent Buffers for input cells (reused per frame)
+    void* bufferCellColors;
+    void* bufferCellStrengths;
+    void* bufferCellHists;
+    void* bufferOutput;
+    
+    size_t bufferCapacityCells; // Current capacity (number of cells)
 };

@@ -11,6 +11,15 @@ using namespace chrono;
 class VideoMosaicGeneratorMetal : public VideoMosaicGenerator {
 private:
     MetalComputeEngine metal_engine;
+    
+    // Persistent buffers to avoid reallocation
+    vector<float> cell_colors;
+    vector<float> cell_strengths;
+    vector<float> cell_hists;
+    vector<int> best_indices;
+    
+    // Persistent Mats (OpenCV reuses memory if size matches)
+    Mat resized_frame, gray, gx, gy, mag, dir, mosaic;
 
 public:
     VideoMosaicGeneratorMetal(const VideoMosaicConfig& cfg) : VideoMosaicGenerator(cfg) {
@@ -18,6 +27,13 @@ public:
             cerr << "Failed to init Metal!" << endl;
             exit(1);
         }
+        
+        // Pre-allocate vectors
+        int num_cells = config.grid_width * config.grid_height;
+        cell_colors.resize(num_cells * 9 * 4);
+        cell_strengths.resize(num_cells);
+        cell_hists.resize(num_cells * 4);
+        best_indices.resize(num_cells);
     }
 
     bool loadTilesAndUpload() {
@@ -67,51 +83,62 @@ public:
         auto start_time = high_resolution_clock::now();
         
         // 1. Resize & Features (CPU optimized)
-        Mat resized_frame;
+        // Note: OpenCV create() automatically checks for size/type match and reuses memory
         int target_w = config.grid_width * config.tile_size;
         int target_h = config.grid_height * config.tile_size;
         resize(input_frame, resized_frame, Size(target_w, target_h), 0, 0, INTER_LINEAR);
         
-        Mat gray, gx, gy, mag, dir;
         cvtColor(resized_frame, gray, COLOR_BGR2GRAY);
         Sobel(gray, gx, CV_32F, 1, 0, 3);
         Sobel(gray, gy, CV_32F, 0, 1, 3);
         cartToPolar(gx, gy, mag, dir, true);
         
-        // 2. Prepare Data for Metal
-        int num_cells = config.grid_width * config.grid_height;
+        auto t1 = high_resolution_clock::now(); // End Prep
         
-        // Match Kernel Expectations:
-        // cell_region_colors: float4 array -> 9 * 4 * num_cells
-        vector<float> cell_colors(num_cells * 9 * 4);
-        vector<float> cell_strengths(num_cells);
-        vector<float> cell_hists(num_cells * 4);
-        vector<int> best_indices(num_cells);
+        // 2. Prepare Data for Metal
+        // Vectors are already allocated in constructor
         
         #pragma omp parallel for collapse(2)
         for(int y=0; y<config.grid_height; y++) {
             for(int x=0; x<config.grid_width; x++) {
                 int idx = y * config.grid_width + x;
                 
-                // Get Region Colors
-                Rect cell_rect(x * config.tile_size, y * config.tile_size, config.tile_size, config.tile_size);
-                Mat cell_img = resized_frame(cell_rect);
+                int start_x = x * config.tile_size;
+                int start_y = y * config.tile_size;
+                int region_w = config.tile_size / 3;
+                int region_h = config.tile_size / 3;
                 
-                // Fast 3x3 grid averaging
-                int rw = cell_img.cols/3; int rh = cell_img.rows/3;
+                // Direct access for 3x3 grid averaging (Zero Allocations!)
                 for(int r=0; r<3; r++) {
                     for(int c=0; c<3; c++) {
-                        Scalar m = mean(cell_img(Rect(c*rw, r*rh, rw, rh)));
-                        // Pack float4 (R, G, B, 0)
+                        int r_x = start_x + c * region_w;
+                        int r_y = start_y + r * region_h;
+                        
+                        int sum_b = 0, sum_g = 0, sum_r = 0;
+                        int count = 0;
+                        
+                        for(int iy=0; iy<region_h; iy++) {
+                            const Vec3b* ptr = resized_frame.ptr<Vec3b>(r_y + iy);
+                            for(int ix=0; ix<region_w; ix++) {
+                                Vec3b p = ptr[r_x + ix];
+                                sum_b += p[0];
+                                sum_g += p[1];
+                                sum_r += p[2];
+                            }
+                        }
+                        count = region_w * region_h;
+                        
+                        float scale = 1.0f / max(1, count);
                         size_t base_idx = (idx * 9 + (r*3+c)) * 4;
-                        cell_colors[base_idx + 0] = (float)m[0];
-                        cell_colors[base_idx + 1] = (float)m[1];
-                        cell_colors[base_idx + 2] = (float)m[2];
+                        cell_colors[base_idx + 0] = sum_b * scale;
+                        cell_colors[base_idx + 1] = sum_g * scale;
+                        cell_colors[base_idx + 2] = sum_r * scale;
                         cell_colors[base_idx + 3] = 0.0f;
                     }
                 }
                 
                 // Get Edge Features
+                Rect cell_rect(x * config.tile_size, y * config.tile_size, config.tile_size, config.tile_size);
                 Mat cell_mag = mag(cell_rect);
                 Mat cell_dir = dir(cell_rect);
                 EdgeFeatures ef = extractEdgeFeaturesFromGlobal(cell_mag, cell_dir);
@@ -121,11 +148,14 @@ public:
             }
         }
         
+        auto t2 = high_resolution_clock::now(); // End Features
+        
         // 3. Run Metal
         metal_engine.findBestMatches(cell_colors, cell_strengths, cell_hists, best_indices);
+        auto t3 = high_resolution_clock::now(); // End of GPU (Metal)
         
         // 4. Construct Image
-        Mat mosaic(target_h, target_w, CV_8UC3);
+        mosaic.create(target_h, target_w, CV_8UC3);
         #pragma omp parallel for collapse(2)
         for(int y=0; y<config.grid_height; y++) {
             for(int x=0; x<config.grid_width; x++) {
@@ -134,16 +164,73 @@ public:
                 tiles.images[idx].copyTo(mosaic(roi));
             }
         }
+        auto t4 = high_resolution_clock::now(); // End of Reconstruction
         
         frame_count++;
+        
+        // --- PROFILING LOGGING ---
+        static double acc_prep = 0, acc_feat = 0, acc_gpu = 0, acc_recon = 0;
+        acc_prep  += duration_cast<microseconds>(t1 - start_time).count();
+        acc_feat  += duration_cast<microseconds>(t2 - t1).count();
+        acc_gpu   += duration_cast<microseconds>(t3 - t2).count();
+        acc_recon += duration_cast<microseconds>(t4 - t3).count();
+        
+        if (frame_count % 60 == 0) {
+            cout << "[Profile] Avg Times (us) -> "
+                 << "Prep: " << (long)(acc_prep/60) << " | "
+                 << "Feat: " << (long)(acc_feat/60) << " | "
+                 << "GPU: "  << (long)(acc_gpu/60)  << " | "
+                 << "Rec: "  << (long)(acc_recon/60) << endl;
+            acc_prep = acc_feat = acc_gpu = acc_recon = 0;
+        }
+        // -------------------------
+
         if (config.show_fps) {
-            auto end_time = high_resolution_clock::now();
-            auto duration = duration_cast<milliseconds>(end_time - start_time);
+            auto duration = duration_cast<milliseconds>(t4 - start_time);
             double fps = 1000.0 / max(1, (int)duration.count());
             putText(mosaic, "Metal FPS: " + to_string((int)fps), Point(20, 60), 
                    FONT_HERSHEY_SIMPLEX, 2.0, Scalar(0, 255, 0), 4);
         }
         return mosaic;
+    }
+    void processWebcam(int camera_id, int benchmark_frames) override {
+        VideoCapture cap(camera_id);
+        if (!cap.isOpened()) {
+            cerr << "Error: Could not open webcam" << endl;
+            return;
+        }
+        
+        Mat frame;
+        int processed = 0;
+        
+        auto bench_start = high_resolution_clock::now();
+        
+        while (true) {
+            @autoreleasepool {
+                if (!cap.read(frame)) break;
+                // Generate directly into the persistent 'mosaic' member
+                generateMosaic(frame); 
+                
+                if (benchmark_frames > 0) {
+                    processed++;
+                    if (processed % 10 == 0) cout << "." << flush;
+                    if (processed >= benchmark_frames) break;
+                    continue; 
+                }
+                
+                imshow("Mosaic", mosaic);
+                int key = waitKey(1);
+                if (key == 'q') break;
+            }
+        }
+        
+        auto bench_end = high_resolution_clock::now();
+        if (processed > 0) {
+            auto duration = duration_cast<milliseconds>(bench_end - bench_start);
+            double fps = 1000.0 * processed / duration.count();
+            cout << endl << "Benchmark Result: " << fps << " FPS (" 
+                 << processed << " frames in " << duration.count() << "ms)" << endl;
+        }
     }
 };
 

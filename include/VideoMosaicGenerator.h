@@ -21,7 +21,7 @@ public:
     // Core functionality
     bool loadTiles();
     virtual cv::Mat generateMosaic(const cv::Mat& input_frame);
-    void processWebcam(int camera_id = 0, int benchmark_frames = 0);
+    virtual void processWebcam(int camera_id = 0, int benchmark_frames = 0);
     
 protected:
     // Helper methods
