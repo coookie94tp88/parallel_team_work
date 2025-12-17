@@ -328,17 +328,28 @@ void VideoMosaicGenerator::processWebcam(int camera_id, int benchmark_frames) {
     Mat frame, mosaic;
     int processed = 0;
     
+    auto bench_start = high_resolution_clock::now();
+    
     while (true) {
         if (!cap.read(frame)) break;
         mosaic = generateMosaic(frame);
         
         if (benchmark_frames > 0) {
             processed++;
+            if (processed % 10 == 0) cout << "." << flush;
             if (processed >= benchmark_frames) break;
             continue; 
         }
         
         imshow("Mosaic", mosaic);
         if (waitKey(1) == 'q') break;
+    }
+    
+    auto bench_end = high_resolution_clock::now();
+    if (processed > 0) {
+        auto duration = duration_cast<milliseconds>(bench_end - bench_start);
+        double fps = 1000.0 * processed / duration.count();
+        cout << endl << "Benchmark Result: " << fps << " FPS (" 
+             << processed << " frames in " << duration.count() << "ms)" << endl;
     }
 }
