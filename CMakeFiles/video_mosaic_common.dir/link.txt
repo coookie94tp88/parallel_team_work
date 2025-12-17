@@ -1,0 +1,2 @@
+/usr/bin/ar qc libvideo_mosaic_common.a CMakeFiles/video_mosaic_common.dir/src/common/TileDatabase.cpp.o CMakeFiles/video_mosaic_common.dir/src/common/VideoMosaicGenerator.cpp.o
+/opt/homebrew/opt/llvm/bin/llvm-ranlib libvideo_mosaic_common.a

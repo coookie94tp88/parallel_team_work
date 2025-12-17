@@ -1,0 +1,6 @@
+/Users/liaoyunyang/NTU_CSIE/2025_2/parallel_programming/final_project/parallel_team_work/CMakeFiles/video_mosaic_common.dir
+/Users/liaoyunyang/NTU_CSIE/2025_2/parallel_programming/final_project/parallel_team_work/CMakeFiles/video_mosaic_cpu.dir
+/Users/liaoyunyang/NTU_CSIE/2025_2/parallel_programming/final_project/parallel_team_work/CMakeFiles/metal_shaders.dir
+/Users/liaoyunyang/NTU_CSIE/2025_2/parallel_programming/final_project/parallel_team_work/CMakeFiles/video_mosaic_metal.dir
+/Users/liaoyunyang/NTU_CSIE/2025_2/parallel_programming/final_project/parallel_team_work/CMakeFiles/edit_cache.dir
+/Users/liaoyunyang/NTU_CSIE/2025_2/parallel_programming/final_project/parallel_team_work/CMakeFiles/rebuild_cache.dir
