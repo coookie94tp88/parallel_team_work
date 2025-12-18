@@ -93,8 +93,6 @@ public:
         Sobel(gray, gy, CV_32F, 0, 1, 3);
         cartToPolar(gx, gy, mag, dir, true);
         
-        auto t1 = high_resolution_clock::now(); // End Prep
-        
         // 2. Prepare Data for Metal
         // Vectors are already allocated in constructor
         
@@ -148,11 +146,8 @@ public:
             }
         }
         
-        auto t2 = high_resolution_clock::now(); // End Features
-        
         // 3. Run Metal
         metal_engine.findBestMatches(cell_colors, cell_strengths, cell_hists, best_indices);
-        auto t3 = high_resolution_clock::now(); // End of GPU (Metal)
         
         // 4. Construct Image
         mosaic.create(target_h, target_w, CV_8UC3);
@@ -164,31 +159,13 @@ public:
                 tiles.images[idx].copyTo(mosaic(roi));
             }
         }
-        auto t4 = high_resolution_clock::now(); // End of Reconstruction
         
         frame_count++;
-        
-        // --- PROFILING LOGGING ---
-        static double acc_prep = 0, acc_feat = 0, acc_gpu = 0, acc_recon = 0;
-        acc_prep  += duration_cast<microseconds>(t1 - start_time).count();
-        acc_feat  += duration_cast<microseconds>(t2 - t1).count();
-        acc_gpu   += duration_cast<microseconds>(t3 - t2).count();
-        acc_recon += duration_cast<microseconds>(t4 - t3).count();
-        
-        if (frame_count % 60 == 0) {
-            cout << "[Profile] Avg Times (us) -> "
-                 << "Prep: " << (long)(acc_prep/60) << " | "
-                 << "Feat: " << (long)(acc_feat/60) << " | "
-                 << "GPU: "  << (long)(acc_gpu/60)  << " | "
-                 << "Rec: "  << (long)(acc_recon/60) << endl;
-            acc_prep = acc_feat = acc_gpu = acc_recon = 0;
-        }
-        // -------------------------
-
         if (config.show_fps) {
-            auto duration = duration_cast<milliseconds>(t4 - start_time);
+            auto end_time = high_resolution_clock::now();
+            auto duration = duration_cast<milliseconds>(end_time - start_time);
             double fps = 1000.0 / max(1, (int)duration.count());
-            putText(mosaic, "Metal FPS: " + to_string((int)fps), Point(20, 60), 
+            putText(mosaic, "FPS: " + to_string((int)fps), Point(20, 60), 
                    FONT_HERSHEY_SIMPLEX, 2.0, Scalar(0, 255, 0), 4);
         }
         return mosaic;

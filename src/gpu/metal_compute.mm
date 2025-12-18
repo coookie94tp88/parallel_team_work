@@ -1,6 +1,12 @@
 #include "metal_compute.h"
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#pragma clang diagnostic ignored "-Wunguarded-availability-new"
+#pragma clang diagnostic ignored "-Wunused-parameter"
+#pragma clang diagnostic ignored "-Wmissing-method-return-type"
 #import <Metal/Metal.h>
 #import <Foundation/Foundation.h>
+#pragma clang diagnostic pop
 #include <iostream>
 #include <fstream>
 
@@ -138,7 +144,8 @@ void MetalComputeEngine::findBestMatches(
             
             cout << "Allocating Metal Cell Buffers for " << numCells << " cells..." << endl;
             
-            MTLResourceOptions options = MTLResourceStorageModeManaged;
+            // Unified Memory (Apple Silicon) -> Shared Mode is optimal
+            MTLResourceOptions options = MTLResourceStorageModeShared;
             
             id<MTLBuffer> bColors = [mtlDevice newBufferWithLength:numCells * 36 * sizeof(float) options:options];
             id<MTLBuffer> bStr = [mtlDevice newBufferWithLength:numCells * sizeof(float) options:options];
@@ -160,14 +167,10 @@ void MetalComputeEngine::findBestMatches(
         id<MTLBuffer> bufCellHist = (__bridge id<MTLBuffer>)bufferCellHists;
         id<MTLBuffer> bufOutput = (__bridge id<MTLBuffer>)bufferOutput;
         
+        // Shared Memory: Just memcpy, the GPU sees it instantly. No sync needed.
         memcpy([bufCellColors contents], cell_colors.data(), cell_colors.size() * sizeof(float));
-        [bufCellColors didModifyRange:NSMakeRange(0, cell_colors.size() * sizeof(float))];
-        
         memcpy([bufCellStr contents], cell_strengths.data(), cell_strengths.size() * sizeof(float));
-        [bufCellStr didModifyRange:NSMakeRange(0, cell_strengths.size() * sizeof(float))];
-        
         memcpy([bufCellHist contents], cell_hists.data(), cell_hists.size() * sizeof(float));
-        [bufCellHist didModifyRange:NSMakeRange(0, cell_hists.size() * sizeof(float))];
         
         // 2. Setup Command Buffer
         uint32_t nTiles = (uint32_t)numTiles;
