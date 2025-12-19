@@ -197,9 +197,9 @@ int main(int argc, char** argv) {
     string video_path = "data/test.mp4";
     string tile_dir = "data/cifar_tiles";
     int tile_size = 32;
-    // Use 64x16 to make it easily splittable up to 64 parts
-    int grid_w = 16;
-    int grid_h = 64; 
+    int grid_w = 60;
+    int grid_h = 45; 
+    int frames_to_render = 5;
     
     vector<Tile> tiles = loadTiles(tile_dir, tile_size);
     if (tiles.empty()) return -1;
@@ -209,60 +209,76 @@ int main(int argc, char** argv) {
         cerr << "Error: Could not open video " << video_path << endl;
         return -1;
     }
-    Mat frame;
-    cap >> frame;
-    if (frame.empty()) return -1;
     
     vector<int> sweep_splits = {1, 2, 4, 8, 16, 32, 64};
     
     cout << "\n=== Hungarian Video Mosaic Profiling Sweep ===" << endl;
     cout << "Grid: " << grid_w << "x" << grid_h << " (" << (grid_w * grid_h) << " cells)" << endl;
     cout << "Tiles: " << tiles.size() << endl;
+    cout << "Frames: " << frames_to_render << " per setting" << endl;
     cout << "------------------------------------------------------------" << endl;
     cout << setw(8) << "Splits" << " | " 
-         << setw(12) << "Preproc (ms)" << " | " 
-         << setw(12) << "Match (ms)" << " | " 
-         << setw(12) << "Render (ms)" << " | " 
-         << setw(10) << "Total (ms)" << endl;
+         << setw(12) << "Avg Pre (ms)" << " | " 
+         << setw(12) << "Avg Match (ms)" << " | " 
+         << setw(12) << "Avg Rend (ms)" << " | " 
+         << setw(10) << "Avg Tot (ms)" << endl;
     cout << "------------------------------------------------------------" << endl;
     
     for (int num_splits : sweep_splits) {
-        Mat output(grid_h * tile_size, grid_w * tile_size, CV_8UC3, Scalar(0,0,0));
-        vector<PhaseTiming> thread_timings(num_splits);
-        vector<thread> threads;
+        double sum_pre = 0, sum_match = 0, sum_render = 0, sum_total = 0;
         
-        auto start_all = high_resolution_clock::now();
-        
-        for (int i = 0; i < num_splits; i++) {
-            threads.emplace_back(processPart, i, num_splits, ref(frame), ref(tiles), 
-                                grid_w, grid_h, tile_size, ref(output), ref(thread_timings[i]));
+        for (int f = 0; f < frames_to_render; f++) {
+            cap.set(CAP_PROP_POS_FRAMES, f);
+            Mat frame;
+            cap >> frame;
+            if (frame.empty()) break;
+            
+            Mat output(grid_h * tile_size, grid_w * tile_size, CV_8UC3, Scalar(0,0,0));
+            vector<PhaseTiming> thread_timings(num_splits);
+            vector<thread> threads;
+            
+            auto start_all = high_resolution_clock::now();
+            
+            for (int i = 0; i < num_splits; i++) {
+                threads.emplace_back(processPart, i, num_splits, ref(frame), ref(tiles), 
+                                    grid_w, grid_h, tile_size, ref(output), ref(thread_timings[i]));
+            }
+            
+            for (auto& t : threads) t.join();
+            
+            auto end_all = high_resolution_clock::now();
+            double total_ms = duration_cast<microseconds>(end_all - start_all).count() / 1000.0;
+            
+            double max_pre = 0, max_match = 0, max_render = 0;
+            for (auto& t : thread_timings) {
+                max_pre = max(max_pre, t.preprocess_ms);
+                max_match = max(max_match, t.matching_ms);
+                max_render = max(max_render, t.render_ms);
+            }
+            
+            sum_pre += max_pre;
+            sum_match += max_match;
+            sum_render += max_render;
+            sum_total += total_ms;
+            
+            string out_name = "output_" + to_string(num_splits) + "_" + to_string(f) + ".png";
+            imwrite(out_name, output);
+            cout << "Saved: " << out_name << " (Frame " << f << ", Splits " << num_splits << ")" << endl;
         }
         
-        for (auto& t : threads) t.join();
+        double avg_pre = sum_pre / frames_to_render;
+        double avg_match = sum_match / frames_to_render;
+        double avg_render = sum_render / frames_to_render;
+        double avg_total = sum_total / frames_to_render;
         
-        auto end_all = high_resolution_clock::now();
-        double total_ms = duration_cast<microseconds>(end_all - start_all).count() / 1000.0;
-        
-        // Find max timing across threads for each phase (bottleneck)
-        double max_pre = 0, max_match = 0, max_render = 0;
-        for (auto& t : thread_timings) {
-            max_pre = max(max_pre, t.preprocess_ms);
-            max_match = max(max_match, t.matching_ms);
-            max_render = max(max_render, t.render_ms);
-        }
-        
-        cout << setw(8) << num_splits << " | " 
-             << setw(12) << fixed << setprecision(2) << max_pre << " | " 
-             << setw(12) << max_match << " | " 
-             << setw(12) << max_render << " | " 
-             << setw(10) << total_ms << endl;
-             
-        if (num_splits == 4) {
-            imwrite("output_mosaic_4.png", output);
-        }
+        cout << ">> Split Result: " << setw(8) << num_splits << " | " 
+             << setw(12) << fixed << setprecision(2) << avg_pre << " | " 
+             << setw(12) << avg_match << " | " 
+             << setw(12) << avg_render << " | " 
+             << setw(10) << avg_total << endl;
+        cout << "------------------------------------------------------------" << endl;
     }
     
-    cout << "------------------------------------------------------------" << endl;
     cout << "Sweep complete." << endl;
     
     return 0;
