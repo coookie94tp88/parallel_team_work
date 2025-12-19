@@ -11,7 +11,7 @@ import os
 import numpy as np
 from PIL import Image
 
-OUTPUT_DIR = "cifar_tiles"
+OUTPUT_DIR = "data/cifar_tiles"
 CIFAR_URL = "https://www.cs.toronto.edu/~kriz/cifar-10-python.tar.gz"
 CIFAR_FILE = "cifar-10-python.tar.gz"
 
