@@ -1,5 +1,6 @@
 #include <iostream>
 #include <string>
+#include <iomanip>
 #include "VideoMosaicGenerator.h"
 #include "../gpu/metal_compute.h"
 
@@ -146,8 +147,10 @@ public:
             }
         }
         
-        // 3. Run Metal
-        metal_engine.findBestMatches(cell_colors, cell_strengths, cell_hists, best_indices);
+        // Create a dummy stats object for normal webcam path if needed, or update generateMosaic to optional stats
+        // To avoid changing pure virtual or base class, we just use a local stats here and ignore it
+        MetalTimingStats stats;
+        metal_engine.findBestMatches(cell_colors, cell_strengths, cell_hists, best_indices, stats);
         
         // 4. Construct Image
         mosaic.create(target_h, target_w, CV_8UC3);
@@ -170,6 +173,150 @@ public:
         }
         return mosaic;
     }
+    void processVideo(const string& filename, int benchmark_frames) {
+        VideoCapture cap(filename);
+        if (!cap.isOpened()) {
+            cerr << "Error: Could not open video file: " << filename << endl;
+            return;
+        }
+        
+        Mat frame;
+        int processed = 0;
+        
+        // Stats Aggregation
+        double total_cpu_pre = 0;
+        double total_metal_upload = 0;
+        double total_metal_compute = 0;
+        double total_metal_readback = 0;
+        double total_cpu_post = 0;
+        double total_frame_time = 0;
+        
+        auto bench_start = high_resolution_clock::now();
+        
+        while (true) {
+            @autoreleasepool {
+                if (!cap.read(frame)) break;
+                
+                auto t_start = high_resolution_clock::now();
+                
+                // 1. Resize & Features (CPU optimized)
+                int target_w = config.grid_width * config.tile_size;
+                int target_h = config.grid_height * config.tile_size;
+                resize(frame, resized_frame, Size(target_w, target_h), 0, 0, INTER_LINEAR);
+                
+                cvtColor(resized_frame, gray, COLOR_BGR2GRAY);
+                Sobel(gray, gx, CV_32F, 1, 0, 3);
+                Sobel(gray, gy, CV_32F, 0, 1, 3);
+                cartToPolar(gx, gy, mag, dir, true);
+                
+                #pragma omp parallel for collapse(2)
+                for(int y=0; y<config.grid_height; y++) {
+                    for(int x=0; x<config.grid_width; x++) {
+                        int idx = y * config.grid_width + x;
+                        
+                        int start_x = x * config.tile_size;
+                        int start_y = y * config.tile_size;
+                        int region_w = config.tile_size / 3;
+                        int region_h = config.tile_size / 3;
+                        
+                        // Direct access for 3x3 grid averaging (Zero Allocations!)
+                        for(int r=0; r<3; r++) {
+                            for(int c=0; c<3; c++) {
+                                int r_x = start_x + c * region_w;
+                                int r_y = start_y + r * region_h;
+                                
+                                int sum_b = 0, sum_g = 0, sum_r = 0;
+                                int count = 0;
+                                
+                                for(int iy=0; iy<region_h; iy++) {
+                                    const Vec3b* ptr = resized_frame.ptr<Vec3b>(r_y + iy);
+                                    for(int ix=0; ix<region_w; ix++) {
+                                        Vec3b p = ptr[r_x + ix];
+                                        sum_b += p[0];
+                                        sum_g += p[1];
+                                        sum_r += p[2];
+                                    }
+                                }
+                                count = region_w * region_h;
+                                
+                                float scale = 1.0f / max(1, count);
+                                size_t base_idx = (idx * 9 + (r*3+c)) * 4;
+                                cell_colors[base_idx + 0] = sum_b * scale;
+                                cell_colors[base_idx + 1] = sum_g * scale;
+                                cell_colors[base_idx + 2] = sum_r * scale;
+                                cell_colors[base_idx + 3] = 0.0f;
+                            }
+                        }
+                        
+                        // Get Edge Features
+                        Rect cell_rect(x * config.tile_size, y * config.tile_size, config.tile_size, config.tile_size);
+                        Mat cell_mag = mag(cell_rect);
+                        Mat cell_dir = dir(cell_rect);
+                        EdgeFeatures ef = extractEdgeFeaturesFromGlobal(cell_mag, cell_dir);
+                        
+                        cell_strengths[idx] = ef.edge_strength;
+                        for(int k=0; k<4; k++) cell_hists[idx*4 + k] = ef.edge_histogram[k];
+                    }
+                }
+                auto t_pre = high_resolution_clock::now();
+                
+                // 3. Run Metal
+                MetalTimingStats stats;
+                metal_engine.findBestMatches(cell_colors, cell_strengths, cell_hists, best_indices, stats);
+                
+                auto t_compute = high_resolution_clock::now(); // CPU time for metal call (includes wait)
+                
+                // 4. Construct Image
+                mosaic.create(target_h, target_w, CV_8UC3);
+                #pragma omp parallel for collapse(2)
+                for(int y=0; y<config.grid_height; y++) {
+                    for(int x=0; x<config.grid_width; x++) {
+                        int idx = best_indices[y * config.grid_width + x];
+                        Rect roi(x*config.tile_size, y*config.tile_size, config.tile_size, config.tile_size);
+                        tiles.images[idx].copyTo(mosaic(roi));
+                    }
+                }
+                
+                auto t_end = high_resolution_clock::now();
+                
+                // Aggregate Stats
+                double cpu_pre_ms = duration_cast<microseconds>(t_pre - t_start).count() / 1000.0;
+                double cpu_post_ms = duration_cast<microseconds>(t_end - t_compute).count() / 1000.0;
+                double frame_ms = duration_cast<microseconds>(t_end - t_start).count() / 1000.0;
+                
+                total_cpu_pre += cpu_pre_ms;
+                total_metal_upload += stats.upload_time_ms;
+                total_metal_compute += stats.compute_time_ms;
+                total_metal_readback += stats.readback_time_ms;
+                total_cpu_post += cpu_post_ms;
+                total_frame_time += frame_ms;
+                
+                processed++;
+                if (processed % 10 == 0) cout << "." << flush;
+                if (benchmark_frames > 0 && processed >= benchmark_frames) break;
+            }
+        }
+        
+        auto bench_end = high_resolution_clock::now();
+        if (processed > 0) {
+            auto duration = duration_cast<milliseconds>(bench_end - bench_start);
+            double fps = 1000.0 * processed / duration.count();
+            
+            cout << endl << "=== Detailed Profiling Results (" << processed << " frames) ===" << endl;
+            cout << "Average FPS: " << fps << endl;
+            cout << "Total Time: " << duration.count() << " ms" << endl;
+            cout << "------------------------------------------------" << endl;
+            cout << "Avg per Frame Breakdown (ms):" << endl;
+            cout << "  CPU Preprocessing:   " << fixed << setprecision(3) << total_cpu_pre / processed << " ms" << endl;
+            cout << "  Metal Upload:        " << total_metal_upload / processed << " ms" << endl;
+            cout << "  Metal Execution:     " << total_metal_compute / processed << " ms" << endl;
+            cout << "  Metal Readback:      " << total_metal_readback / processed << " ms" << endl;
+            cout << "  CPU Construction:    " << total_cpu_post / processed << " ms" << endl;
+            cout << "------------------------------------------------" << endl;
+            cout << "  Total Frame Time:    " << total_frame_time / processed << " ms" << endl;
+        }
+    }
+
     void processWebcam(int camera_id, int benchmark_frames) override {
         VideoCapture cap(camera_id);
         if (!cap.isOpened()) {
@@ -216,11 +363,13 @@ void printUsage(const char* program_name) {
     cout << "  -d, --tiles DIR     Tile directory" << endl;
     cout << "  --medium            Medium grid (60x45)" << endl;
     cout << "  --ultra             Ultra grid (100x75)" << endl;
+    cout << "  -i, --input FILE    Input video file (optional, defaults to webcam)" << endl;
 }
 
-int main(int argc, char** argv) {
+    int main(int argc, char** argv) {
     VideoMosaicConfig config;
     int benchmark_frames = 0;
+    string input_video = "";
     
     for (int i = 1; i < argc; i++) {
         string arg = argv[i];
@@ -229,6 +378,7 @@ int main(int argc, char** argv) {
         else if (arg == "--frames") { if (i + 1 < argc) benchmark_frames = atoi(argv[++i]); }
         else if (arg == "--medium") { config.grid_width = 60; config.grid_height = 45; }
         else if (arg == "--ultra") { config.grid_width = 100; config.grid_height = 75; }
+        else if (arg == "-i" || arg == "--input") { if (i + 1 < argc) input_video = argv[++i]; }
     }
     
     cout << "=== Metal GPU Video Mosaic ===" << endl;
@@ -236,6 +386,10 @@ int main(int argc, char** argv) {
     VideoMosaicGeneratorMetal generator(config);
     if (!generator.loadTilesAndUpload()) return -1;
     
-    generator.processWebcam(0, benchmark_frames);
+    if (!input_video.empty()) {
+        generator.processVideo(input_video, benchmark_frames > 0 ? benchmark_frames : 1000000);
+    } else {
+        generator.processWebcam(0, benchmark_frames);
+    }
     return 0;
 }

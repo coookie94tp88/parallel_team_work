@@ -21,6 +21,12 @@ struct MetalTileData {
     size_t count;
 };
 
+struct MetalTimingStats {
+    double upload_time_ms;
+    double compute_time_ms;
+    double readback_time_ms;
+};
+
 class MetalComputeEngine {
 public:
     MetalComputeEngine();
@@ -38,7 +44,8 @@ public:
         const std::vector<float>& cell_colors,     // 9 * num_cells floats
         const std::vector<float>& cell_strengths,  // num_cells floats
         const std::vector<float>& cell_hists,      // 4 * num_cells floats
-        std::vector<int>& best_indices             // Output: num_cells ints
+        std::vector<int>& best_indices,            // Output: num_cells ints
+        MetalTimingStats& stats                    // Output: Timing stats
     );
 
 private:

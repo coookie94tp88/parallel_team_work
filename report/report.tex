@@ -1,0 +1,164 @@
+\documentclass{article}
+\usepackage{graphicx}
+\usepackage{listings}
+\usepackage{amsmath}
+\usepackage{float}
+\usepackage{hyperref}
+
+\usepackage{xeCJK}
+\setCJKmainfont{Noto Serif TC} % Standard Mac Chinese font
+
+\title{Parallel Video Mosaic Generation with Metal GPU Acceleration}
+\author{
+B12902046 廖昀陽 \\
+B12902131 陳柏宇 \\
+B13902055 薛閔澤
+}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This project implements a high-performance video mosaic generator that reconstructs a live webcam feed using a database of 60,000 tile images (CIFAR-10) in real-time. We compare a multi-threaded CPU implementation using OpenMP against a hardware-accelerated version using Apple Metal. By offloading the computationally intensive feature matching step to the GPU, we achieve a significant speedup, enabling $\sim$10 FPS processing at high resolutions where the CPU implementation struggles at <1 FPS. The source code is available at: \url{https://github.com/coookie94tp88/parallel_team_work}.
+\end{abstract}
+
+\section{Introduction}
+Digital photo mosaics are created by replacing grid cells of a target image with smaller "tile" images that best match the color and structure of the original region. Applying this to video in real-time presents a massive computational challenge. For a grid of $100 \times 75$ cells (7,500 total) and a database of 60,000 tiles, a naïve implementation requires performing $7,500 \times 60,000 = 450 \text{ million}$ comparisons per frame. At 30 FPS, this equates to 13.5 billion comparisons per second.
+
+This project explores parallel optimization techniques to solve this problem, progressively moving from a multi-threaded CPU approach to a massively parallel GPU solution on Apple Silicon (M3).
+
+\section{Methodology}
+
+\subsection{Evolution of Approaches}
+We explored three distinct algorithmic approaches to solve the mosaic generation problem:
+
+\subsubsection{Naive Greedy Approach (Legacy)}
+The simplest implementation (originally \texttt{src/apps/legacy/video\_mosaic.cpp}) iterates through each grid cell and selects the tile with the minimum Euclidean distance in RGB space. 
+\begin{enumerate}
+    \item \textbf{Pros}: Fast ($O(N \cdot M)$ where $N$ is cells, $M$ is tiles).
+    \item \textbf{Cons}: Result is visually flat; ignores structure/edges. Tiles are repeated frequently, making the mosaic look like a low-resolution sampling rather than a collage.
+\end{enumerate}
+
+\subsubsection{Global Optimization (Legacy)}
+To improve visual quality and reduce repetition, we explored a cost-matrix based approach (\texttt{src/apps/legacy/video\_mosaic\_optimal.cpp}).
+\begin{enumerate}
+    \item \textbf{Pros}: High artistic quality; no varying tile repetition.
+    \item \textbf{Cons}: \textbf{[TODO: Hungarian algorithm details]}
+\end{enumerate}
+
+\subsubsection{Edge-Aware Matching (Final Approach)}
+To balance performance and visual fidelity, we adopted the "Edge-Aware" metric. It allows tile repetition (unlike the optimal approach) but enforces structural consistency (unlike the naive approach).
+\begin{itemize}
+    \item \textbf{Metric Calculation}: The total distance is a weighted sum:
+    \[ Total\_Dist = (w_{color} \cdot Dist_{color}) + (w_{dir} \cdot Dist_{dir} \cdot 100) + (w_{str} \cdot Diff_{str}) \]
+    where $Dist_{color}$ is the L2 distance of 3x3 regional colors, $Diff_{str}$ is the difference in average gradient magnitude, and $Dist_{dir}$ is the Chi-Square distance between 4-bin edge direction histograms.
+    
+    \item \textbf{Efficient Sobel Execution}:
+    \begin{itemize}
+        \item \textbf{Per Frame}: The Sobel operator is applied to the \textit{entire resized frame} at once (not per-cell) to generate global gradient maps. Grid cells simply slice these pre-computed maps, avoiding redundant calculations.
+        \item \textbf{Per Tile}: Edge features for the 60,000 tiles are pre-computed once during the loading phase and cached in memory. Sobel is \textit{never} executed on tiles during runtime.
+    \end{itemize}
+\end{itemize}
+
+\subsection{CPU Optimization (OpenMP)}
+Our optimized CPU implementation (\texttt{src/apps/video\_mosaic\_cpu.cpp}) uses the shared \texttt{VideoMosaicGenerator} class and employs two key strategies:
+\begin{itemize}
+    \item \textbf{Global Feature Extraction}: Instead of resizing and computing Sobel gradients for each of the 7,500 grid cells individually (which involves redundant computation at boundaries), we resize the full input frame once and compute global gradient maps. Grid features are then sliced directly from these maps.
+    \item \textbf{Parallel Search}: We use OpenMP (\texttt{\#pragma omp parallel for}) to parallelize the search. Each thread handles a subset of grid cells.
+\end{itemize}
+
+\subsection{GPU Acceleration (Metal)}
+To overcome CPU compute limits, we implemented a custom Metal compute kernel.
+\begin{itemize}
+    \item \textbf{Wait-Free Parallelism}: The problem is "embarrassingly parallel". Each grid cell can find its best matching tile independently of all others.
+    \item \textbf{Compute Kernel}: We launch one GPU thread per grid cell. Each thread iterates through the entire 60,000-tile database stored in GPU private memory, finds the tile index with the minimum cost, and writes it to an output buffer.
+    \item \textbf{Unified Memory}: On Apple Silicon, we leverage the unified memory architecture. The CPU writes grid features to a buffer, and the GPU reads them directly, minimizing data transfer overhead compared to discrete GPUs.
+    \item \textbf{Data Layout Optimization}: We implemented a Structure-of-Arrays (SoA) layout for tile data, ensuring optimal memory coalescing. A critical implementation detail was padding 3-channel (RGB) color data to 4-channel (\texttt{float4}) alignment (16 bytes). This avoids alignment mismatches between the C++ host and Metal kernel, which can lead to data corruption or performance degradation.
+\end{itemize}
+
+\section{Experimental Results}
+
+\subsection{Hardware and Workload Setup}
+\begin{itemize}
+    \item \textbf{System}: Apple MacBook Air (M3 Chip with Unified Memory).
+    \item \textbf{Dataset}: CIFAR-10 (60,000 images, $32 \times 32$ pixels).
+    \item \textbf{Workload Configurations}:
+    \begin{itemize}
+        \item \textbf{Medium Grid}: $60 \times 45$ cells ($2,700$ total). Requires $2,700 \times 60,000 = \textbf{162 million}$ comparisons per frame.
+        \item \textbf{Ultra Grid}: $100 \times 75$ cells ($7,500$ total). Requires $7,500 \times 60,000 = \textbf{450 million}$ comparisons per frame.
+    \end{itemize}
+\end{itemize}
+
+\subsection{Performance Benchmark}
+We evaluated the frame rate (FPS) of three implementations:
+\begin{enumerate}
+    \item \textbf{CPU 1T}: Optimized CPU code running on 1 thread.
+    \item \textbf{CPU 8T}: Optimized CPU code running on 8 threads (OpenMP).
+    \item \textbf{Metal}: GPU accelerated implementation.
+\end{enumerate}
+
+\subsection{Standardized Video Benchmark (CIFAR Dataset)}
+To ensure consistent and reproducible results, we ran a standardized benchmark using a test video file ($60 \times 45$ and $100 \times 75$ grids, 50 frames) and the full CIFAR-10 dataset (60,000 tiles) to maximize the search space.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{|l|l|r|c|}
+\hline
+\textbf{Configuration} & \textbf{Workload} & \textbf{FPS} & \textbf{Speedup} \\ \hline
+CPU 1T & Medium ($60 \times 45$) & 0.98 & 1.0x (Baseline) \\ \hline
+CPU 8T & Medium ($60 \times 45$) & 3.73 & 3.8x \\ \hline
+\textbf{Metal GPU} & \textbf{Medium ($60 \times 45$)} & \textbf{23.29} & \textbf{6.2x (vs CPU 8T)} \\ \hline
+\hline
+CPU 8T & Ultra ($100 \times 75$) & 1.25 & -- \\ \hline
+\textbf{Metal GPU} & \textbf{Ultra ($100 \times 75$)} & \textbf{11.29} & \textbf{9.0x (vs CPU 8T)} \\ \hline
+\end{tabular}
+\caption{Benchmark results on CIFAR dataset (60k tiles). The larger search space significantly penalizes the CPU, while Metal maintains interactive frame rates.}
+\end{table}
+
+\subsection{Detailed Pipeline Analysis}
+To provide a direct comparison, the profiling methodology explicitly separates the "Preprocessing" phase (including feature extraction) from the "Matching" phase, aligning the CPU breakdown with the Metal pipeline structure.
+
+\begin{table}[H]
+\centering
+\begin{small}
+\begin{tabular}{|l|r|r|r|}
+\hline
+\textbf{Pipeline Stage} & \textbf{CPU 1T (Ultra)} & \textbf{CPU 8T (Ultra)} & \textbf{Metal (Ultra)} \\ \hline
+Preprocessing & 65.62 ms & 25.46 ms & 25.82 ms \\ \hline
+Matching (Search) & 3372.27 ms & 768.17 ms & 59.14 ms \\ \hline
+Data Transfer & -- & -- & 0.03 ms \\ \hline
+Construction & 1.51 ms & 1.48 ms & 1.51 ms \\ \hline
+\hline
+\textbf{Total Frame Time} & \textbf{3439.40 ms} & \textbf{801.37 ms} & \textbf{86.51 ms} \\ \hline
+\end{tabular}
+\end{small}
+\caption{Detailed breakdown for Ultra Grid ($100 \times 75$) with 60,000 tiles. The consistent preprocessing times confirm the overhead of feature extraction.}
+\end{table}
+
+\textbf{Analysis:}
+\begin{itemize}
+    \item \textbf{Preprocessing Consistency}: Both implementations exhibit approximately 25.5 ms for Preprocessing. This underscores the fixed computational cost of feature extraction for 7,500 cells on the CPU.
+    \item \textbf{Massive Compute Speedup}: The computational advantage of the GPU is evident in the Matching phase. The CPU 8T requires \textbf{768 ms} to search 60,000 tiles for 7,500 cells, whereas the Metal GPU completes the same task in \textbf{59 ms} (a \textbf{13x} compute speedup).
+    \item \textbf{Scalability}: As the dataset size increases, the CPU frame time grows significantly due to the $O(N \cdot M)$ complexity of the search. The GPU handles the increased load more efficiently due to its massive parallelism.
+\end{itemize}
+
+\section{Conclusion}
+We successfully implemented a real-time edge-aware video mosaic generator. While CPU optimizations provided a 4x speedup over single-threaded execution, they fell short of real-time performance for high-resolution grids. The Metal GPU implementation solved this bottleneck, enabling interactive $\sim$10 FPS processing even at "Ultra" grid settings, demonstrating the power of hardware acceleration for massive pattern matching tasks.
+
+\subsection{Future Work}
+\begin{itemize}
+    \item \textbf{Temporal Consistency}: Currently, tiles are selected independently for each frame, which can cause flickering. Future work could incorporate a temporal cost term to penalize changing tiles too frequently.
+    \item \textbf{Color Correction}: To improve visual fidelity, we could implement color transfer techniques to adjust the mean color of the selected tile to exactly match the target region.
+    \item \textbf{Larger Database}: Expanding the database beyond CIFAR-10 (e.g., ImageNet) would provide better matches but require further optimization (e.g., spatial hashing or tree-based search) to maintain real-time performance.
+\end{itemize}
+
+\section{Work Distribution}
+\begin{itemize}
+    \item \textbf{B12902046 廖昀陽}: GPU Implementation (Metal kernel, Data packing), CMake build system.
+    \item \textbf{B12902131 陳柏宇}: CPU Optimization (OpenMP, Refactoring), Benchmarking.
+    \item \textbf{B13902055 薛閔澤}: Initial CPU version, Report writing, Project coordination.
+\end{itemize}
+
+\end{document}

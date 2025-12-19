@@ -353,3 +353,132 @@ void VideoMosaicGenerator::processWebcam(int camera_id, int benchmark_frames) {
              << processed << " frames in " << duration.count() << "ms)" << endl;
     }
 }
+
+void VideoMosaicGenerator::processVideo(const std::string& filename, int benchmark_frames) {
+    VideoCapture cap(filename);
+    if (!cap.isOpened()) {
+        cerr << "Error: Could not open video file: " << filename << endl;
+        return;
+    }
+    
+    Mat frame;
+    int processed = 0;
+    
+    // Stats
+    double total_pre = 0;
+    double total_match = 0;
+    double total_construct = 0;
+    double total_frame = 0;
+    
+    // Buffers
+    Mat resized_frame, global_gray, global_grad_x, global_grad_y, global_magnitude, global_direction;
+    Mat mosaic;
+    
+    auto bench_start = high_resolution_clock::now();
+    
+    // Helper to store best matches to split loop
+    vector<int> best_indices(config.grid_width * config.grid_height);
+    // Helper to store cell features for batch processing (aligned with Metal)
+    vector<TileFeatures> grid_features(config.grid_width * config.grid_height);
+    
+    while (true) {
+        if (!cap.read(frame)) break;
+        
+        auto t_start = high_resolution_clock::now();
+        
+        // 1. Preprocessing (Resize + Sobel + Feature Extraction)
+        // This now matches Metal's "Preprocessing" scope
+        int target_w = config.grid_width * config.tile_size;
+        int target_h = config.grid_height * config.tile_size;
+        resize(frame, resized_frame, Size(target_w, target_h), 0, 0, INTER_LINEAR);
+        
+        cvtColor(resized_frame, global_gray, COLOR_BGR2GRAY);
+        Sobel(global_gray, global_grad_x, CV_32F, 1, 0, 3);
+        Sobel(global_gray, global_grad_y, CV_32F, 0, 1, 3);
+        cartToPolar(global_grad_x, global_grad_y, global_magnitude, global_direction, true);
+        
+        // Extract features for all cells (Parallelized)
+        #pragma omp parallel for collapse(2)
+        for (int y = 0; y < config.grid_height; y++) {
+            for (int x = 0; x < config.grid_width; x++) {
+                Rect cell_rect(x * config.tile_size, y * config.tile_size, 
+                              config.tile_size, config.tile_size);
+                
+                Mat cell_magnitude = global_magnitude(cell_rect);
+                Mat cell_direction = global_direction(cell_rect);
+                Mat cell_img = resized_frame(cell_rect);
+                
+                TileFeatures cell_features = computeRegionColors(cell_img);
+                cell_features.edges = extractEdgeFeaturesFromGlobal(cell_magnitude, cell_direction);
+                
+                grid_features[y * config.grid_width + x] = cell_features;
+            }
+        }
+        
+        auto t_pre = high_resolution_clock::now();
+        
+        // 2. Matching (Pure Search)
+        // Now this loop ONLY does the O(N) search, just like Metal kernel
+        #pragma omp parallel for collapse(2)
+        for (int y = 0; y < config.grid_height; y++) {
+            for (int x = 0; x < config.grid_width; x++) {
+                const TileFeatures& target = grid_features[y * config.grid_width + x];
+                
+                int best_idx = 0;
+                float best_dist = __FLT_MAX__;
+                
+                // Linear Search
+                for(size_t i=0; i<tiles.size(); i++) {
+                    float d = combinedDistance(target, tiles.features[i]);
+                    if(d < best_dist) { best_dist = d; best_idx = i; }
+                }
+                
+                best_indices[y * config.grid_width + x] = best_idx;
+            }
+        }
+        
+        auto t_match = high_resolution_clock::now();
+        
+        // 3. Construction
+        mosaic.create(target_h, target_w, CV_8UC3);
+        
+        #pragma omp parallel for collapse(2)
+        for(int y=0; y<config.grid_height; y++) {
+            for(int x=0; x<config.grid_width; x++) {
+                int idx = best_indices[y * config.grid_width + x];
+                Rect roi(x*config.tile_size, y*config.tile_size, config.tile_size, config.tile_size);
+                tiles.images[idx].copyTo(mosaic(roi));
+            }
+        }
+        
+        auto t_end = high_resolution_clock::now();
+        
+        // Accumulate Stats
+        total_pre += duration_cast<microseconds>(t_pre - t_start).count() / 1000.0;
+        total_match += duration_cast<microseconds>(t_match - t_pre).count() / 1000.0;
+        total_construct += duration_cast<microseconds>(t_end - t_match).count() / 1000.0;
+        total_frame += duration_cast<microseconds>(t_end - t_start).count() / 1000.0;
+        
+        processed++;
+        if (processed % 10 == 0) cout << "." << flush;
+        if (benchmark_frames > 0 && processed >= benchmark_frames) break;
+    }
+    
+    auto bench_end = high_resolution_clock::now();
+    if (processed > 0) {
+        auto duration = duration_cast<milliseconds>(bench_end - bench_start);
+        double fps = 1000.0 * processed / duration.count();
+        
+        cout << endl << "=== CPU Profiling Results (" << processed << " frames) ===" << endl;
+        cout << "Threads: " << config.num_threads << endl;
+        cout << "Average FPS: " << fps << endl;
+        cout << "Total Time: " << duration.count() << " ms" << endl;
+        cout << "------------------------------------------------" << endl;
+        cout << "Avg per Frame breakdown (ms):" << endl;
+        cout << "  Preprocessing: " << total_pre / processed << " ms" << endl;
+        cout << "  Matching:      " << total_match / processed << " ms" << endl;
+        cout << "  Construction:  " << total_construct / processed << " ms" << endl;
+        cout << "------------------------------------------------" << endl;
+        cout << "  Total Frame:   " << total_frame / processed << " ms" << endl;
+    }
+}

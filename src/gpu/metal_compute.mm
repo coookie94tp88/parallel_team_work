@@ -123,7 +123,8 @@ void MetalComputeEngine::findBestMatches(
     const std::vector<float>& cell_colors,
     const std::vector<float>& cell_strengths,
     const std::vector<float>& cell_hists,
-    std::vector<int>& best_indices
+    std::vector<int>& best_indices,
+    MetalTimingStats& stats
 ) {
     @autoreleasepool {
         id<MTLDevice> mtlDevice = (__bridge id<MTLDevice>)device;
@@ -161,52 +162,66 @@ void MetalComputeEngine::findBestMatches(
             bufferCapacityCells = numCells;
         }
         
-        // 1. Copy Data to Persistent Buffers
-        id<MTLBuffer> bufCellColors = (__bridge id<MTLBuffer>)bufferCellColors;
-        id<MTLBuffer> bufCellStr = (__bridge id<MTLBuffer>)bufferCellStrengths;
-        id<MTLBuffer> bufCellHist = (__bridge id<MTLBuffer>)bufferCellHists;
-        id<MTLBuffer> bufOutput = (__bridge id<MTLBuffer>)bufferOutput;
-        
-        // Shared Memory: Just memcpy, the GPU sees it instantly. No sync needed.
-        memcpy([bufCellColors contents], cell_colors.data(), cell_colors.size() * sizeof(float));
-        memcpy([bufCellStr contents], cell_strengths.data(), cell_strengths.size() * sizeof(float));
-        memcpy([bufCellHist contents], cell_hists.data(), cell_hists.size() * sizeof(float));
-        
-        // 2. Setup Command Buffer
-        uint32_t nTiles = (uint32_t)numTiles;
-        id<MTLCommandBuffer> cmdBuffer = [queue commandBuffer];
-        id<MTLComputeCommandEncoder> encoder = [cmdBuffer computeCommandEncoder];
-        
-        [encoder setComputePipelineState:pso];
-        
-        // Bind Buffers
-        [encoder setBuffer:(__bridge id<MTLBuffer>)bufferTileColors offset:0 atIndex:0];
-        [encoder setBuffer:(__bridge id<MTLBuffer>)bufferTileStrengths offset:0 atIndex:1];
-        [encoder setBuffer:(__bridge id<MTLBuffer>)bufferTileHists offset:0 atIndex:2];
-        
-        [encoder setBuffer:bufCellColors offset:0 atIndex:3];
-        [encoder setBuffer:bufCellStr offset:0 atIndex:4];
-        [encoder setBuffer:bufCellHist offset:0 atIndex:5];
-        [encoder setBuffer:bufOutput offset:0 atIndex:6];
-        
-        [encoder setBytes:&nTiles length:sizeof(uint32_t) atIndex:7];
-        
-        // Dispatch
-        MTLSize threadsPerGrid = MTLSizeMake(numCells, 1, 1);
-        NSUInteger w = pso.threadExecutionWidth;
-        NSUInteger h = pso.maxTotalThreadsPerThreadgroup / w;
-        MTLSize threadsPerGroup = MTLSizeMake(w * h, 1, 1);
-        if (threadsPerGroup.width > numCells) threadsPerGroup.width = numCells;
-        
-        [encoder dispatchThreads:threadsPerGrid threadsPerThreadgroup:threadsPerGroup];
-        [encoder endEncoding];
-        
-        // Commit and Wait
-        [cmdBuffer commit];
-        [cmdBuffer waitUntilCompleted];
-        
-        // 3. Read Results
-        int* ptr = (int*)[bufOutput contents];
-        memcpy(best_indices.data(), ptr, numCells * sizeof(int));
+    // Use CFTimeInterval for high-precision timing on macOS/iOS
+    CFTimeInterval t0, t1, t2, t3;
+    
+    // 1. Copy Data to Persistent Buffers (Upload)
+    t0 = CFAbsoluteTimeGetCurrent();
+    
+    id<MTLBuffer> bufCellColors = (__bridge id<MTLBuffer>)bufferCellColors;
+    id<MTLBuffer> bufCellStr = (__bridge id<MTLBuffer>)bufferCellStrengths;
+    id<MTLBuffer> bufCellHist = (__bridge id<MTLBuffer>)bufferCellHists;
+    id<MTLBuffer> bufOutput = (__bridge id<MTLBuffer>)bufferOutput;
+    
+    // Shared Memory: Just memcpy, the GPU sees it instantly. No sync needed.
+    memcpy([bufCellColors contents], cell_colors.data(), cell_colors.size() * sizeof(float));
+    memcpy([bufCellStr contents], cell_strengths.data(), cell_strengths.size() * sizeof(float));
+    memcpy([bufCellHist contents], cell_hists.data(), cell_hists.size() * sizeof(float));
+    
+    t1 = CFAbsoluteTimeGetCurrent();
+    stats.upload_time_ms = (t1 - t0) * 1000.0;
+    
+    // 2. Setup Command Buffer
+    uint32_t nTiles = (uint32_t)numTiles;
+    id<MTLCommandBuffer> cmdBuffer = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [cmdBuffer computeCommandEncoder];
+    
+    [encoder setComputePipelineState:pso];
+    
+    // Bind Buffers
+    [encoder setBuffer:(__bridge id<MTLBuffer>)bufferTileColors offset:0 atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)bufferTileStrengths offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)bufferTileHists offset:0 atIndex:2];
+    
+    [encoder setBuffer:bufCellColors offset:0 atIndex:3];
+    [encoder setBuffer:bufCellStr offset:0 atIndex:4];
+    [encoder setBuffer:bufCellHist offset:0 atIndex:5];
+    [encoder setBuffer:bufOutput offset:0 atIndex:6];
+    
+    [encoder setBytes:&nTiles length:sizeof(uint32_t) atIndex:7];
+    
+    // Dispatch
+    MTLSize threadsPerGrid = MTLSizeMake(numCells, 1, 1);
+    NSUInteger w = pso.threadExecutionWidth;
+    NSUInteger h = pso.maxTotalThreadsPerThreadgroup / w;
+    MTLSize threadsPerGroup = MTLSizeMake(w * h, 1, 1);
+    if (threadsPerGroup.width > numCells) threadsPerGroup.width = numCells;
+    
+    [encoder dispatchThreads:threadsPerGrid threadsPerThreadgroup:threadsPerGroup];
+    [encoder endEncoding];
+    
+    // Commit and Wait
+    [cmdBuffer commit];
+    [cmdBuffer waitUntilCompleted];
+    
+    t2 = CFAbsoluteTimeGetCurrent();
+    stats.compute_time_ms = (t2 - t1) * 1000.0;
+    
+    // 3. Read Results
+    int* ptr = (int*)[bufOutput contents];
+    memcpy(best_indices.data(), ptr, numCells * sizeof(int));
+    
+    t3 = CFAbsoluteTimeGetCurrent();
+    stats.readback_time_ms = (t3 - t2) * 1000.0;
     }
 }

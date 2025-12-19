@@ -12,12 +12,15 @@ void printUsage(const char* program_name) {
     cout << "  --small             Small grid (40x30)" << endl;
     cout << "  --medium            Medium grid (60x45, default)" << endl;
     cout << "  --large             Large grid (80x60)" << endl;
+
     cout << "  --ultra             Ultra grid (100x75)" << endl;
+    cout << "  -i, --input FILE    Input video file" << endl;
 }
 
 int main(int argc, char** argv) {
     VideoMosaicConfig config;
     int benchmark_frames = 0;
+    string input_video = "";
 
     for (int i = 1; i < argc; i++) {
         string arg = argv[i];
@@ -29,6 +32,7 @@ int main(int argc, char** argv) {
         else if (arg == "--medium") { config.grid_width = 60; config.grid_height = 45; }
         else if (arg == "--large") { config.grid_width = 80; config.grid_height = 60; }
         else if (arg == "--ultra") { config.grid_width = 100; config.grid_height = 75; }
+        else if (arg == "-i" || arg == "--input") { if (i + 1 < argc) input_video = argv[++i]; }
     }
 
     cout << "=== CPU Video Mosaic ===" << endl;
@@ -38,6 +42,10 @@ int main(int argc, char** argv) {
     VideoMosaicGenerator generator(config);
     if (!generator.loadTiles()) return -1;
     
-    generator.processWebcam(0, benchmark_frames);
+    if (!input_video.empty()) {
+        generator.processVideo(input_video, benchmark_frames > 0 ? benchmark_frames : 1000000);
+    } else {
+        generator.processWebcam(0, benchmark_frames);
+    }
     return 0;
 }

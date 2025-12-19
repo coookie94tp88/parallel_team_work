@@ -27,7 +27,7 @@ bin/
 *.fdb_latexmk
 *.xdv
 *.pdf
-report/
+
 
 # Binaries
 video_mosaic_cpu

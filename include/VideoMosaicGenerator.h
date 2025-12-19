@@ -22,6 +22,14 @@ public:
     bool loadTiles();
     virtual cv::Mat generateMosaic(const cv::Mat& input_frame);
     virtual void processWebcam(int camera_id = 0, int benchmark_frames = 0);
+    virtual void processVideo(const std::string& filename, int benchmark_frames = 0);
+
+    struct CpuTimingStats {
+        double pre_time_ms;
+        double match_time_ms;
+        double construct_time_ms;
+        double total_time_ms;
+    };
     
 protected:
     // Helper methods
