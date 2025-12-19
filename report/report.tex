@@ -44,9 +44,11 @@ The simplest implementation (originally \texttt{src/apps/legacy/video\_mosaic.cp
 \subsubsection{Global Optimization (Legacy)}
 To improve visual quality and reduce repetition, we explored a cost-matrix based approach (\texttt{src/apps/legacy/video\_mosaic\_optimal.cpp}).
 \begin{enumerate}
-    \item \textbf{Pros}: High artistic quality; no varying tile repetition.
-    \item \textbf{Cons}: \textbf{[TODO: Hungarian algorithm details]}
+    \item \textbf{Cons}: Extremely high computational cost. The original Hungarian algorithm (Kuhn-Munkres) for optimal bipartite matching has $O(N^2 \cdot M)$ complexity, where $N$ is the number of cells and $M$ is the number of tiles. This makes it impractical for large grids without parallelization.
 \end{enumerate}
+
+\subsubsection{Parallel Hungarian Approach (Current Study)}
+To make the optimal assignment feasible, we implemented a 4-threaded version (\texttt{src/apps/video\_mosaic\_hungarian.cpp}) that divides the frame into horizontal strips. Each thread independently solves the matching problem for its strip, reducing the effective $N$ per sub-problem and significantly lowering the total computation time while maintaining high matching quality.
 
 \subsubsection{Edge-Aware Matching (Final Approach)}
 To balance performance and visual fidelity, we adopted the "Edge-Aware" metric. It allows tile repetition (unlike the optimal approach) but enforces structural consistency (unlike the naive approach).
@@ -132,9 +134,28 @@ Data Transfer & -- & -- & 0.03 ms \\ \hline
 Construction & 1.51 ms & 1.48 ms & 1.51 ms \\ \hline
 \hline
 \textbf{Total Frame Time} & \textbf{3439.40 ms} & \textbf{801.37 ms} & \textbf{86.51 ms} \\ \hline
+\end{table}
+
+\subsection{Hungarian Algorithm Parallelization (Sweep)}
+To evaluate the scalability of the Hungarian algorithm, we performed a split-based parallelization sweep. The input frame ($1024$ cells) was divided into $K$ horizontal strips, with $K$ threads processing one strip each. As shown in Table \ref{tab:hungarian_sweep}, increasing the number of splits provides a near-quadratic speedup in the matching phase, which is consistent with the $O(N^2 \cdot M)$ complexity of the algorithm.
+
+\begin{table}[H]
+\centering
+\begin{small}
+\begin{tabular}{|r|r|r|r|r|}
+\hline
+\textbf{Splits} & \textbf{Preproc (ms)} & \textbf{Match (ms)} & \textbf{Render (ms)} & \textbf{Total (ms)} \\ \hline
+1  & 222.96 & 86103.96 & 1.60 & 86334.78 \\ \hline
+2  & 97.00  & 20820.00 & 0.45 & 20920.28 \\ \hline
+4  & 76.82  & 5041.18  & 0.20 & 5118.91  \\ \hline
+8  & 89.76  & 1504.84  & 0.14 & 1571.71  \\ \hline
+16 & 114.16 & 595.40   & 0.12 & 689.20   \\ \hline
+32 & 243.02 & 233.71   & 0.06 & 407.46   \\ \hline
+64 & 167.13 & 113.73   & 0.05 & 234.16   \\ \hline
 \end{tabular}
 \end{small}
-\caption{Detailed breakdown for Ultra Grid ($100 \times 75$) with 60,000 tiles. The consistent preprocessing times confirm the overhead of feature extraction.}
+\caption{Hungarian Algorithm sweep results (1024 cells, 60k tiles). The matching time dropped from 86s to 113ms by increasing splits to 64.}
+\label{tab:hungarian_sweep}
 \end{table}
 
 \textbf{Analysis:}
