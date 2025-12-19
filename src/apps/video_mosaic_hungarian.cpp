@@ -7,6 +7,7 @@
 #include <mutex>
 #include <algorithm>
 #include <limits>
+#include <iomanip>
 #include <boost/filesystem.hpp>
 
 namespace fs = boost::filesystem;
@@ -75,7 +76,6 @@ public:
             } while (j0 != 0);
         }
         
-        // Reconstruct assignment: assignment[i-1] = j-1 means row i-1 is matched to column j-1
         for (int j = 1; j <= m; ++j) {
             if (p[j] != 0) {
                 assignment[p[j] - 1] = j - 1;
@@ -87,6 +87,12 @@ public:
 struct Tile {
     Mat image;
     Vec3f mean_color;
+};
+
+struct PhaseTiming {
+    double preprocess_ms = 0;
+    double matching_ms = 0;
+    double render_ms = 0;
 };
 
 vector<Tile> loadTiles(const string& tile_dir, int tile_size) {
@@ -128,19 +134,19 @@ vector<Tile> loadTiles(const string& tile_dir, int tile_size) {
     return tiles;
 }
 
-// Function performed by each thread
-void processPart(int thread_id, const Mat& frame, const vector<Tile>& tiles, 
-                 int grid_w, int grid_h, int tile_size, Mat& output) {
-    int start_y = (grid_h * thread_id) / 4;
-    int end_y = (grid_h * (thread_id + 1)) / 4;
+void processPart(int thread_id, int num_splits, const Mat& frame, const vector<Tile>& tiles, 
+                 int grid_w, int grid_h, int tile_size, Mat& output, PhaseTiming& timing) {
+    
+    auto t_start = high_resolution_clock::now();
+    
+    int rows_per_split = grid_h / num_splits;
+    int start_y = thread_id * rows_per_split;
+    int end_y = (thread_id == num_splits - 1) ? grid_h : (thread_id + 1) * rows_per_split;
     
     int num_cells = (end_y - start_y) * grid_w;
     int num_tiles = tiles.size();
     
-    cout << "Thread " << thread_id << " processing " << num_cells << " cells..." << endl;
-    
-    // 1. Build cost matrix for this part
-    // cost_matrix[cell_idx][tile_idx]
+    // 1. Preprocess: Build cost matrix
     vector<vector<float>> cost_matrix(num_cells, vector<float>(num_tiles));
     
     int cell_ptr = 0;
@@ -160,12 +166,18 @@ void processPart(int thread_id, const Mat& frame, const vector<Tile>& tiles,
         }
     }
     
-    // 2. Solve Hungarian
+    auto t_match_start = high_resolution_clock::now();
+    timing.preprocess_ms = duration_cast<microseconds>(t_match_start - t_start).count() / 1000.0;
+    
+    // 2. Matching: Solve Hungarian
     HungarianAlgorithm hungarian;
     vector<int> assignment;
     hungarian.Solve(cost_matrix, assignment);
     
-    // 3. Render tiles to output
+    auto t_render_start = high_resolution_clock::now();
+    timing.matching_ms = duration_cast<microseconds>(t_render_start - t_match_start).count() / 1000.0;
+    
+    // 3. Render: Place tiles
     cell_ptr = 0;
     for (int gy = start_y; gy < end_y; gy++) {
         for (int gx = 0; gx < grid_w; gx++) {
@@ -177,65 +189,81 @@ void processPart(int thread_id, const Mat& frame, const vector<Tile>& tiles,
         }
     }
     
-    cout << "Thread " << thread_id << " finished." << endl;
+    auto t_end = high_resolution_clock::now();
+    timing.render_ms = duration_cast<microseconds>(t_end - t_render_start).count() / 1000.0;
 }
 
 int main(int argc, char** argv) {
     string video_path = "data/test.mp4";
     string tile_dir = "data/cifar_tiles";
     int tile_size = 32;
-    int grid_w = 40;
-    int grid_h = 40; // Total 1600 cells. 4 parts of 400 cells each.
+    // Use 64x16 to make it easily splittable up to 64 parts
+    int grid_w = 16;
+    int grid_h = 64; 
     
-    // Load tiles
     vector<Tile> tiles = loadTiles(tile_dir, tile_size);
     if (tiles.empty()) return -1;
     
-    // Since Hungarian is O(N^2 * M), 60k tiles and 400 cells is feasible but slow.
-    // 400^2 * 60,000 = 160,000 * 60,000 = 9.6 billion operations.
-    // This should take about 10-30 seconds per thread.
-    
-    // Read one frame
     VideoCapture cap(video_path);
     if (!cap.isOpened()) {
         cerr << "Error: Could not open video " << video_path << endl;
         return -1;
     }
-    
     Mat frame;
     cap >> frame;
-    if (frame.empty()) {
-        cerr << "Error: Could not read frame from " << video_path << endl;
-        return -1;
+    if (frame.empty()) return -1;
+    
+    vector<int> sweep_splits = {1, 2, 4, 8, 16, 32, 64};
+    
+    cout << "\n=== Hungarian Video Mosaic Profiling Sweep ===" << endl;
+    cout << "Grid: " << grid_w << "x" << grid_h << " (" << (grid_w * grid_h) << " cells)" << endl;
+    cout << "Tiles: " << tiles.size() << endl;
+    cout << "------------------------------------------------------------" << endl;
+    cout << setw(8) << "Splits" << " | " 
+         << setw(12) << "Preproc (ms)" << " | " 
+         << setw(12) << "Match (ms)" << " | " 
+         << setw(12) << "Render (ms)" << " | " 
+         << setw(10) << "Total (ms)" << endl;
+    cout << "------------------------------------------------------------" << endl;
+    
+    for (int num_splits : sweep_splits) {
+        Mat output(grid_h * tile_size, grid_w * tile_size, CV_8UC3, Scalar(0,0,0));
+        vector<PhaseTiming> thread_timings(num_splits);
+        vector<thread> threads;
+        
+        auto start_all = high_resolution_clock::now();
+        
+        for (int i = 0; i < num_splits; i++) {
+            threads.emplace_back(processPart, i, num_splits, ref(frame), ref(tiles), 
+                                grid_w, grid_h, tile_size, ref(output), ref(thread_timings[i]));
+        }
+        
+        for (auto& t : threads) t.join();
+        
+        auto end_all = high_resolution_clock::now();
+        double total_ms = duration_cast<microseconds>(end_all - start_all).count() / 1000.0;
+        
+        // Find max timing across threads for each phase (bottleneck)
+        double max_pre = 0, max_match = 0, max_render = 0;
+        for (auto& t : thread_timings) {
+            max_pre = max(max_pre, t.preprocess_ms);
+            max_match = max(max_match, t.matching_ms);
+            max_render = max(max_render, t.render_ms);
+        }
+        
+        cout << setw(8) << num_splits << " | " 
+             << setw(12) << fixed << setprecision(2) << max_pre << " | " 
+             << setw(12) << max_match << " | " 
+             << setw(12) << max_render << " | " 
+             << setw(10) << total_ms << endl;
+             
+        if (num_splits == 4) {
+            imwrite("output_mosaic_4.png", output);
+        }
     }
     
-    cout << "Original frame size: " << frame.cols << "x" << frame.rows << endl;
-    
-    // Create output mosaic image
-    Mat output(grid_h * tile_size, grid_w * tile_size, CV_8UC3, Scalar(0,0,0));
-    
-    // Launch 4 threads
-    cout << "Starting 4 threads for Hungarian assignment..." << endl;
-    auto start_time = high_resolution_clock::now();
-    
-    vector<thread> threads;
-    for (int i = 0; i < 4; i++) {
-        threads.emplace_back(processPart, i, ref(frame), ref(tiles), 
-                            grid_w, grid_h, tile_size, ref(output));
-    }
-    
-    for (auto& t : threads) {
-        t.join();
-    }
-    
-    auto end_time = high_resolution_clock::now();
-    auto duration = duration_cast<seconds>(end_time - start_time);
-    cout << "Total time: " << duration.count() << " seconds." << endl;
-    
-    // Save output
-    string output_path = "output_mosaic.png";
-    imwrite(output_path, output);
-    cout << "Saved mosaic to: " << output_path << endl;
+    cout << "------------------------------------------------------------" << endl;
+    cout << "Sweep complete." << endl;
     
     return 0;
 }
