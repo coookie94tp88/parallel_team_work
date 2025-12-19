@@ -84,7 +84,8 @@ To overcome CPU compute limits, we implemented a custom Metal compute kernel.
 
 \subsection{Hardware and Workload Setup}
 \begin{itemize}
-    \item \textbf{System}: Apple MacBook Air (M3 Chip with Unified Memory).
+    \item \textbf{System (Metal Benchmarks)}: Apple MacBook Air (M3 Chip with Unified Memory).
+    \item \textbf{System (Hungarian Benchmarks)}: 12th Gen Intel(R) Core(TM) i5-12500H (Windows WSL).
     \item \textbf{Dataset}: CIFAR-10 (60,000 images, $32 \times 32$ pixels).
     \item \textbf{Workload Configurations}:
     \begin{itemize}
@@ -144,17 +145,16 @@ To evaluate the scalability of the Hungarian algorithm, we performed a split-bas
 \begin{small}
 \begin{tabular}{|r|r|r|r|r|}
 \hline
-\textbf{Splits} & \textbf{Preproc (ms)} & \textbf{Match (ms)} & \textbf{Render (ms)} & \textbf{Total (ms)} \\ \hline
-1  & 222.96 & 86103.96 & 1.60 & 86334.78 \\ \hline
-2  & 97.00  & 20820.00 & 0.45 & 20920.28 \\ \hline
-4  & 76.82  & 5041.18  & 0.20 & 5118.91  \\ \hline
-8  & 89.76  & 1504.84  & 0.14 & 1571.71  \\ \hline
-16 & 114.16 & 595.40   & 0.12 & 689.20   \\ \hline
-32 & 243.02 & 233.71   & 0.06 & 407.46   \\ \hline
-64 & 167.13 & 113.73   & 0.05 & 234.16   \\ \hline
+\textbf{Splits} & \textbf{Avg Pre (ms)} & \textbf{Avg Match (ms)} & \textbf{Avg Rend (ms)} & \textbf{Avg Tot (ms)} \\ \hline
+1  & 514.14 & 151169.12 & 2.83 & 151696.92 \\ \hline
+2  & 275.57 & 37639.37  & 1.08 & 37915.68  \\ \hline
+4  & 166.15 & 9934.78   & 0.51 & 10101.47  \\ \hline
+8  & 209.89 & 7226.16   & 0.43 & 7441.55   \\ \hline
+16 & 318.70 & 15833.03  & 0.75 & 16168.28  \\ \hline
+32 & 358.84 & 13813.56  & 0.59 & 14205.84  \\ \hline
 \end{tabular}
 \end{small}
-\caption{Hungarian Algorithm sweep results (1024 cells, 60k tiles). The matching time dropped from 86s to 113ms by increasing splits to 64.}
+\caption{Hungarian Algorithm sweep results on \textbf{12th Gen Intel(R) Core(TM) i5-12500H} ($60 \times 45$ grid, $2700$ cells, 60k tiles, avg of 5 frames). The matching time shows significant improvement with splitting, though overhead and system variation are visible at higher split counts.}
 \label{tab:hungarian_sweep}
 \end{table}
 
